@@ -6,7 +6,7 @@ plus a simulator that approximates what a native 2 mm acquisition would actually
 have produced.
 
 Nothing here modifies the original training entry points. `train.py`, `test.py`
-and `inference.py` still work as before. Four bug fixes were made outside `sr/` —
+and `inference.py` still work as before. Five bug fixes were made outside `sr/` —
 they are listed at the bottom.
 
 ---
@@ -440,6 +440,26 @@ discriminator active. If you OOM, in order of effectiveness:
 Patch dimensions must be divisible by 4 (two stride-2 encoders); `sr_options.py`
 enforces this with a clear error rather than a shape mismatch deep in the decoder.
 
+**Patch sizes other than 128³ used to crash**, and this is worth knowing if you
+inherit an older checkout. `MambaLayer.__init__` precomputed its
+generalised-Hilbert scan for a hardcoded 32×32×32 grid. The bottleneck sits after
+two stride-2 encoders, so its size is `patch_size / 4` — correct at 128³, wrong
+everywhere else. A 96³ patch gives a 24³ = 13824-element sequence while the gather
+indices still ran to 32767:
+
+```
+ScatterGatherKernel.cu:144 ... Assertion `idx_dim >= 0 && idx_dim < index_size
+&& "index out of bounds"` failed
+```
+
+reported asynchronously at whatever op ran next — usually `torch.flip` — so the
+traceback points somewhere unrelated to indexing. The scan is now built lazily
+from the runtime shape and cached per shape, and `gilbert3d` was already
+size-general: verified to yield a valid permutation of `0..n-1` at 16³, 24³, 32³
+and 48³, i.e. patch sizes 64, 96, 128 and 192. The same edit removed a hardcoded
+`device = 'cuda:0'` that would have pinned index tensors to GPU 0 under
+`DataParallel`.
+
 ---
 
 ## Evaluation
@@ -652,6 +672,14 @@ Three bugs that this pipeline depends on:
    commented out for this reason; `gambas_model.py` was missed. This one matters
    here because the preemption/requeue design depends on `--continue_train`.
 
+4. **`models/mamba_modules3D.py`** — `MambaLayer` precomputed its
+   generalised-Hilbert scan for a hardcoded 32×32×32 grid, so any patch size
+   other than 128³ produced out-of-bounds `torch.gather` indices and a
+   device-side assert. Now built lazily from the runtime shape and cached per
+   shape. Same edit replaced a hardcoded `device = 'cuda:0'` with `x.device`,
+   which would otherwise pin index tensors to GPU 0 under `DataParallel`. See
+   the patch-size note in the Memory section.
+
 Plus one fixed inside `sr/` itself, worth recording because it was invisible:
 `simulate_lowres.py` derived its per-subject noise seed from `hash((seed, name))`.
 Python salts string hashing per process (PEP 456), so `--seed` had **no effect** —
@@ -659,7 +687,7 @@ the noise realisation in every training input differed on each run while the fla
 implied otherwise. Now derived from `blake2b` via `kspace.stable_seed`, and
 verified: same seed twice is bit-identical, different seeds differ.
 
-4. Not changed, but worth knowing: `utils/NiftiDataset.resample_sitk_image` and
+5. Not changed, but worth knowing: `utils/NiftiDataset.resample_sitk_image` and
    `CropBackground` use `np.int`, removed in NumPy ≥ 1.24. They are only reached
    when `--resample True`, which this pipeline leaves off. If you turn resampling
    on, replace `np.int` with `int`.

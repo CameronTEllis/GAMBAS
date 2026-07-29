@@ -97,23 +97,75 @@ class MambaLayer(nn.Module):
         self.mamba2 = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
 
         self.conv1d = nn.Conv3d(in_channels=512, out_channels=256, kernel_size=1)
-        self.generator = gilbert3d(32, 32, 32)
-        self.gilbert_indices = generate_gilbert_indices_3D(32, 32, 32, self.generator).expand(-1, dim, -1).permute(0, 2, 1)
-        self.degilbert_indices = torch.argsort(self.gilbert_indices)
-        self.gilbert_r_indices = torch.flip(self.gilbert_indices, dims=[2])
-        self.degilbert_r_indices = torch.argsort(self.gilbert_r_indices)
-    
+
+        # The generalised-Hilbert scan order used to be precomputed here for a
+        # HARDCODED 32x32x32 grid:
+        #
+        #     self.generator = gilbert3d(32, 32, 32)
+        #     self.gilbert_indices = generate_gilbert_indices_3D(32, 32, 32, ...)
+        #
+        # The bottleneck sits after two stride-2 encoders, so its spatial size is
+        # patch_size / 4. That made 32^3 correct for a 128^3 patch and WRONG for
+        # anything else: a 96^3 patch gives a 24^3 = 13824-element sequence while
+        # the gather indices still ran to 32767, producing
+        #
+        #     ScatterGatherKernel.cu:144 ... Assertion `idx_dim >= 0 &&
+        #     idx_dim < index_size && "index out of bounds"` failed
+        #
+        # reported asynchronously at whatever op ran next (usually torch.flip),
+        # which makes it look unrelated to indexing.
+        #
+        # `gilbert3d` already supports arbitrary grid sizes, so the fix is to
+        # build the scan lazily from the runtime shape and cache it per shape.
+        # One entry per distinct bottleneck size; training uses exactly one.
+        self._scan_cache = {}
+
+    def _scan_indices(self, D, H, W, device):
+        """(gilbert, degilbert, gilbert_reversed, degilbert_reversed) for D,H,W.
+
+        Cached per (D, H, W, device). Buffers are NOT registered as module state:
+        they are derived deterministically from the shape, so keeping them out of
+        the state_dict means checkpoints stay portable across patch sizes.
+        """
+        key = (D, H, W, str(device))
+        if key not in self._scan_cache:
+            gen = gilbert3d(D, H, W)
+            g = generate_gilbert_indices_3D(D, H, W, gen)
+            g = g.expand(-1, self.dim, -1).permute(0, 2, 1).to(device)
+            n = D * H * W
+            if int(g.max()) >= n or int(g.min()) < 0 or g.shape[1] != n:
+                raise RuntimeError(
+                    'gilbert scan for %dx%dx%d produced indices in [%d, %d] with '
+                    'length %d, expected [0, %d) with length %d. The bottleneck '
+                    'grid is patch_size/4 per axis.'
+                    % (D, H, W, int(g.min()), int(g.max()), g.shape[1], n, n))
+            gr = torch.flip(g, dims=[2])
+            self._scan_cache[key] = (g, torch.argsort(g), gr, torch.argsort(gr))
+        return self._scan_cache[key]
+
+
     def forward(self, x):
         B, C, D, H, W = x.shape
 
         # Check model dimension
         assert C == self.dim
 
-        # Bidirectional mamba
+        # Bidirectional mamba.
+        #
+        # The scan order is derived from the ACTUAL spatial shape rather than a
+        # hardcoded 32^3, so any patch size works. Was `device = 'cuda:0'`, which
+        # also broke multi-GPU DataParallel: replicas on cuda:1+ received index
+        # tensors pinned to cuda:0. Take the device from the input instead.
         x1 = x.view(B, C, -1).permute(0, 2, 1)
-        device = 'cuda:0'
-        self.gilbert_indices = self.gilbert_indices.to(device)
-        x1 = torch.gather(x1, 1, self.gilbert_indices)
+        gilbert, degilbert, _, degilbert_r = self._scan_indices(D, H, W, x.device)
+
+        # Expand along batch: the cached index tensor has batch extent 1.
+        if gilbert.shape[0] != B:
+            gilbert = gilbert.expand(B, -1, -1)
+            degilbert = degilbert.expand(B, -1, -1)
+            degilbert_r = degilbert_r.expand(B, -1, -1)
+
+        x1 = torch.gather(x1, 1, gilbert)
         x2 = torch.flip(x1, dims=[1])
 
         # Pass forwad and reverse through mamba
@@ -122,10 +174,8 @@ class MambaLayer(nn.Module):
         norm_out2 = self.norm(x2)
         mamba_out2 = self.mamba2(norm_out2)
 
-        self.degilbert_indices = self.degilbert_indices.to(device)
-        self.degilbert_r_indices = self.degilbert_r_indices.to(device)
-        out1 = torch.gather(mamba_out1, 1, self.degilbert_indices).permute(0, 2, 1).view(B, C, D, H, W)
-        out2 = torch.gather(mamba_out2, 1, self.degilbert_r_indices).permute(0, 2, 1).view(B, C, D, H, W)
+        out1 = torch.gather(mamba_out1, 1, degilbert).permute(0, 2, 1).view(B, C, D, H, W)
+        out2 = torch.gather(mamba_out2, 1, degilbert_r).permute(0, 2, 1).view(B, C, D, H, W)
 
         # out1 = mamba_out1.permute(0, 2, 1).view(B, C, D, H, W)
         # out2 = mamba_out2.permute(0, 2, 1).view(B, C, D, H, W)
