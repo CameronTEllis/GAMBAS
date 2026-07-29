@@ -38,6 +38,76 @@ if [ -n "$MODULES_TO_LOAD" ]; then
   module load $MODULES_TO_LOAD
 fi
 
+# ---------------------------------------------------------------------------
+# Toolchain preflight
+# ---------------------------------------------------------------------------
+# The CUDA extensions below need BOTH nvcc and a modern host compiler. nvcc
+# shells out to g++ for host code, so an ancient system g++ fails even when nvcc
+# is present -- with a confusing cascade of "string_view: No such file or
+# directory" and "#error You need C++17" rather than anything naming the
+# compiler. Checking here converts a 30-minute failed build into a 1-second
+# message.
+#
+# Set MODULES_TO_LOAD in config.local.sh to fix both at once, e.g.
+#   export MODULES_TO_LOAD="gcc/9.1.0 cuda/12.1.1"
+GCC_MIN=9
+TOOLCHAIN_OK=1
+
+if command -v nvcc >/dev/null 2>&1; then
+  echo "nvcc     : $(nvcc --version | sed -n 's/^.*release \([0-9.]*\).*$/\1/p' | tail -1)"
+else
+  echo "nvcc     : NOT FOUND"
+  TOOLCHAIN_OK=0
+fi
+
+if command -v g++ >/dev/null 2>&1; then
+  GCC_MAJOR="$(g++ -dumpversion | cut -d. -f1)"
+  echo "g++      : $(g++ -dumpversion)  ($(command -v g++))"
+  if [ "${GCC_MAJOR:-0}" -lt "$GCC_MIN" ]; then
+    echo "           ^ too old; PyTorch headers need GCC >= $GCC_MIN"
+    TOOLCHAIN_OK=0
+  fi
+else
+  echo "g++      : NOT FOUND"
+  TOOLCHAIN_OK=0
+fi
+
+if [ "$TOOLCHAIN_OK" = "0" ] && [ "${SKIP_MAMBA:-0}" != "1" ]; then
+  echo
+  echo "=========================================================================="
+  echo " Toolchain incomplete -- the CUDA extensions cannot build."
+  echo " Try:   module avail gcc ; module avail cuda"
+  echo "        module load gcc/9.1.0 cuda/12.1.1"
+  echo " then record it in sr/cluster/config.local.sh:"
+  echo '        export MODULES_TO_LOAD="gcc/9.1.0 cuda/12.1.1"'
+  echo
+  echo " Continuing with SKIP_MAMBA=1 so you still get a working environment for"
+  echo " stages 1-2 (simulate / build dataset / QC / folds)."
+  echo "=========================================================================="
+  echo
+  SKIP_MAMBA=1
+fi
+
+# Point nvcc at the host compiler explicitly. CUDAHOSTCXX is the variable that
+# actually controls it -- setting only CXX is not enough.
+if [ "${TOOLCHAIN_OK}" = "1" ]; then
+  export CC="${CC:-$(command -v gcc)}"
+  export CXX="${CXX:-$(command -v g++)}"
+  export CUDAHOSTCXX="${CUDAHOSTCXX:-$CXX}"
+fi
+
+# Restrict the architectures compiled for. The upstream default builds
+# sm_75/80/87/90, which (a) omits sm_70 (V100) entirely and (b) takes ~4x longer
+# than needed. Query the actual GPU when one is visible.
+if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  DETECTED_ARCH="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+                   | sort -u | paste -sd';' -)"
+  if [ -n "$DETECTED_ARCH" ]; then
+    export TORCH_CUDA_ARCH_LIST="$DETECTED_ARCH"
+    echo "arch list: $TORCH_CUDA_ARCH_LIST (detected)"
+  fi
+fi
+
 # shellcheck disable=SC1090
 source "$CONDA_SH"
 
@@ -59,6 +129,14 @@ echo "--- SimpleITK (binary only) ---"
 pip install --only-binary=SimpleITK "SimpleITK==2.2.0" || pip install --only-binary=SimpleITK SimpleITK
 
 echo "--- core python deps ---"
+# transformers is PINNED and the pin is load-bearing. mamba_ssm/__init__.py
+# eagerly imports its LM head, which imports
+# `transformers.generation.GreedySearchDecoderOnlyOutput` -- a symbol removed in
+# transformers 5.x. Unpinned, pip resolves to 5.x, which additionally requires
+# torch >= 2.4 and so disables itself against torch 2.2.2, and then
+# `from mamba_ssm import Mamba` fails at import with an ImportError that names
+# transformers rather than the version conflict. GAMBAS never uses the LM head;
+# the pin exists purely to keep that import chain satisfiable.
 pip install \
   "numpy<2" \
   "scipy>=1.10" \
@@ -67,6 +145,7 @@ pip install \
   tqdm \
   lpips \
   "monai==1.3.0" \
+  "transformers==${TRANSFORMERS_VER:-4.44.2}" \
   tensorboard \
   nibabel
 
@@ -94,9 +173,15 @@ else
   #    If none matches, pip falls back to an sdist and compiles, which needs nvcc
   #    and can take 30+ minutes. MAX_JOBS caps parallelism so that build cannot
   #    OOM the node.
+  #  * mamba_ssm is installed FROM GIT, not from PyPI. The PyPI sdist for 2.2.2
+  #    is ~85 kB and does not ship the `csrc/` CUDA sources that its own setup.py
+  #    references, so a source build dies with
+  #      ninja: error: '.../csrc/selective_scan/selective_scan.cpp' ... missing
+  #    no matter how good your toolchain is. The git tag contains csrc/.
   export MAX_JOBS="${MAX_JOBS:-4}"
   CC1D_SPEC="${CC1D_SPEC:-causal-conv1d>=1.4.0}"
-  MAMBA_SPEC="${MAMBA_SPEC:-mamba_ssm==2.2.2}"
+  MAMBA_VER="${MAMBA_VER:-2.2.2}"
+  MAMBA_SPEC="${MAMBA_SPEC:-git+https://github.com/state-spaces/mamba.git@v${MAMBA_VER}}"
 
   # Each install is failure-tolerant. With `set -e`, a bare pip failure here
   # would kill the script before the verification block, leaving you with no
@@ -117,16 +202,22 @@ else
     echo "a try/except and falls back to a plain conv1d. Slower, still correct."
   fi
 
+  # `--no-build-isolation` is required, not optional. With isolation, pip builds
+  # in a fresh venv that has no numpy and downloads its OWN latest torch (2.6+),
+  # so setup.py either crashes on `No module named 'torch'` or probes the wrong
+  # torch version. Passing it makes the build see the torch we just installed.
   MAMBA_OK=1
-  if ! pip install "$MAMBA_SPEC"; then
-    echo "no matching mamba_ssm wheel; trying a source build (slow, needs nvcc)"
-    MAMBA_FORCE_BUILD=TRUE pip install --no-build-isolation "$MAMBA_SPEC" \
-      || MAMBA_OK=0
-  fi
+  echo "installing mamba_ssm from $MAMBA_SPEC"
+  MAMBA_FORCE_BUILD=TRUE pip install --no-build-isolation "$MAMBA_SPEC" || MAMBA_OK=0
   if [ "$MAMBA_OK" = "1" ]; then
     MAMBA_STATUS="installed"
   else
     MAMBA_STATUS="FAILED"
+    echo
+    echo "mamba_ssm did not install. This one IS required -- "
+    echo "models/mamba_modules3D.py line 19 does an unconditional"
+    echo "'from mamba_ssm import Mamba', so the generator cannot be built."
+    echo "Stages 1-2 still work; training does not."
   fi
 fi
 
@@ -191,6 +282,23 @@ print('  training / inference               : %s'
 # recoverable, partial outcome rather than a failed setup.
 sys.exit(0 if cpu_ok else 1)
 EOF
+
+echo
+# Snapshot the resolved versions. Finding a working combination on this stack
+# took several rounds (nvcc, GCC, an incomplete sdist, a transformers conflict),
+# and pip resolves every unpinned dependency to a current release against a
+# 2024-era torch. This turns "which versions worked" from tribal knowledge into
+# a file you can diff or reinstall from.
+FROZEN="$HERE/requirements-frozen.txt"
+{
+  echo "# Generated by setup_env.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# python $(python -V 2>&1 | cut -d' ' -f2)  gcc $(g++ -dumpversion 2>/dev/null || echo n/a)"
+  echo "# nvcc $(nvcc --version 2>/dev/null | sed -n 's/^.*release \([0-9.]*\).*$/\1/p' | tail -1 || echo n/a)"
+  echo "# TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-<unset>}"
+  echo "# MODULES_TO_LOAD=${MODULES_TO_LOAD:-<none>}"
+  pip freeze
+} > "$FROZEN"
+echo "wrote $FROZEN"
 
 echo
 echo "environment '$CONDA_ENV' built (mamba: ${MAMBA_STATUS:-unknown})."

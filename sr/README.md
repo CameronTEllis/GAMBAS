@@ -84,6 +84,37 @@ alongside its output. Pointing the builder at untouched `originals/` risks a
 silent direction-cosine mismatch — `check_dataset.py` catches it, but only after
 you have built the dataset.
 
+### Why the native 2 mm volume isn't always exactly half-size
+
+`lowres-<method>/` — the training input — is **always exactly your input grid**;
+it is cropped back with the same offsets it was padded with. `lowres-<method>-native/`
+can be one voxel larger per axis than `n/2`, and that is expected.
+
+The requirement is divisibility by **4**, not by 2:
+
+```python
+rem = (-n) % (2 * f)        # f = 2, so modulo 4
+```
+
+| original dim | pad | native 2 mm | exactly n/2? |
+|---|---|---|---|
+| 256, 176, 192 (≡0 mod 4) | 0 | 128, 88, 96 | yes |
+| 182, 154, 90 (≡2 mod 4) | 1 + 1 | 92, 78, 46 | no, one voxel larger |
+
+An even dimension is therefore not sufficient. The reason for 4 rather than 2 is
+that the coarse matrix is forced even, so the k-space crop stays symmetric about
+DC — an odd coarse dimension puts DC off-centre and introduces a half-voxel
+spatial shift. Guaranteeing `padded / 2` is even needs `padded` divisible by 4.
+
+Consequences: the native volume is centre-aligned with the original, so nothing is
+shifted; its FOV just extends 1 mm past each edge, which is the edge-replicate
+padding showing through. It is used only for the record and for the BSpline
+baseline in `evaluate_sr.py`, where SimpleITK resamples it against the HR image as
+reference, so the extra FOV is handled correctly.
+
+Per-subject numbers are recorded in `qc-<method>/*.json` as `input_size`,
+`pad_before`, `padded_shape` and `lowres_shape`.
+
 ## Quick start
 
 ```bash
