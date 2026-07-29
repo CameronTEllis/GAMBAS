@@ -87,7 +87,8 @@ export LAMBDA_ADV="${LAMBDA_ADV:-0.0}"
 # At n~50 this is likely the biggest single win available. Download from
 #   https://github.com/levente-1/GAMBAS/releases/tag/v1.0
 # Leave empty to train from random initialisation.
-export INIT_FROM="${INIT_FROM:-}"
+export INIT_FROM="$CKPT_DIR/pretrained/gambas_v1_net_G.pth"
+#export INIT_FROM="${INIT_FROM:-}"
 export INIT_MIN_COVERAGE="${INIT_MIN_COVERAGE:-0.5}"
 
 # ---- on-the-fly degradation randomisation ----------------------------------
