@@ -356,7 +356,9 @@ def s_warm_start(args, ds):
     gpu_ids = [] if args.cpu else [0]
     mk = lambda: networks3D.define_G(1, 1, 64, 'gambas', 'instance', False,
                                     'normal', 0.02, gpu_ids,
-                                    **{'img_size': (256, 256)})
+                                    **{'img_size': (256, 256),
+                                       'global_residual':
+                                           os.environ.get('GLOBAL_RESIDUAL', '1') != '0'})
     src = mk()
     ckpt = os.path.join(args.work_dir, 'init_G.pth')
     inner = src.module if isinstance(src, torch.nn.DataParallel) else src
@@ -397,9 +399,13 @@ def s_inference(args, ds):
 
     dev = torch.device('cpu') if args.cpu else torch.device('cuda:0')
     gpu_ids = [] if args.cpu else [0]
+    residual = os.environ.get('GLOBAL_RESIDUAL', '1') != '0'
     net = networks3D.define_G(1, 1, 64, 'gambas', 'instance', False, 'normal',
-                              0.02, gpu_ids, **{'img_size': (256, 256)})
+                              0.02, gpu_ids,
+                              **{'img_size': (256, 256),
+                                 'global_residual': residual})
     net.to(dev).eval()
+    print('global_residual: %s' % residual)
 
     imgs = ND.lstFiles(os.path.join(ds, 'val', 'images'))
     labs = ND.lstFiles(os.path.join(ds, 'val', 'labels'))
@@ -417,9 +423,30 @@ def s_inference(args, ds):
     for k in sorted(m):
         print('  %-22s %.5f' % (k, m[k]))
     assert m['psnr'] > 10, 'baseline PSNR implausibly low -- check the pairing'
-    # Untrained net: metrics will be terrible. We only check they compute.
     mm = sr_metrics.all_metrics(to01(pred), to01(hr))
-    print('untrained net PSNR %.3f (expected to be bad)' % mm['psnr'])
+
+    if residual:
+        # End-to-end proof of the property the whole change rests on: with
+        # res_scale == 0 the untrained network is EXACTLY the identity, so
+        # epoch-0 validation must equal the sinc baseline rather than sitting
+        # ~10 dB below it. Checked here rather than in a unit test because it
+        # also exercises the sliding-window path -- if the overlap-blend weights
+        # did not sum to 1, identity input would come back subtly attenuated and
+        # nothing else in the pipeline would notice.
+        err = float(np.abs(pred - lr).max())
+        print('untrained net PSNR %.3f  (residual: must equal the sinc %.3f)'
+              % (mm['psnr'], m['psnr']))
+        print('max |pred - input| = %.3e  (identity at init, incl. window blend)' % err)
+        assert err < 1e-4, (
+            'global_residual is set but the untrained net is not the identity '
+            '(max abs error %.3e). Either res_scale did not initialise to zero '
+            'or the sliding-window blend weights do not sum to 1.' % err)
+        assert abs(mm['psnr'] - m['psnr']) < 0.05, (
+            'untrained residual net scored %.3f but the sinc baseline is %.3f; '
+            'these must match.' % (mm['psnr'], m['psnr']))
+    else:
+        # Untrained net: metrics will be terrible. We only check they compute.
+        print('untrained net PSNR %.3f (expected to be bad)' % mm['psnr'])
 
 
 def main():

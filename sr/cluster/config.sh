@@ -82,6 +82,29 @@ export LAMBDA_L1="${LAMBDA_L1:-100.0}"       # --lambda_A
 # against the target's.
 export LAMBDA_ADV="${LAMBDA_ADV:-0.0}"
 
+# ---- architecture: global residual -----------------------------------------
+# Predict y = x + s*G(x) rather than y = G(x), with s a learnable scalar that
+# starts at 0.
+#
+# As published, GAMBAS has NO path from input to output: the encoder strides the
+# volume down 4x, nine bottleneck blocks run there, and the decoder rebuilds
+# everything from scratch. That fits its original task (64 mT ULF T2w -> 3T-like)
+# where input and target differ enormously and the anatomy really must be
+# synthesised.
+#
+# It is the wrong bias here. Measured on this cohort's validation set, the
+# sinc-interpolated 2 mm input is already 31-42 dB (median ~38 dB) from the 1 mm
+# target. The network's job is to add the missing band above 0.25 cyc/voxel, not
+# to regenerate what it was handed -- yet a 4x-strided bottleneck with no skip
+# discards exactly the fine detail it must preserve, so it burns capacity
+# relearning the identity. That is why the first run sat ~10 dB BELOW the sinc
+# baseline at epoch 10.
+#
+# With s initialised to zero, epoch 0 reproduces the baseline exactly and every
+# step is measured as improvement on it rather than a climb back up to it.
+# Set to 0 to reproduce the published architecture.
+export GLOBAL_RESIDUAL="${GLOBAL_RESIDUAL:-1}"
+
 # ---- warm start ------------------------------------------------------------
 # Path to the released GAMBAS generator weights, used to initialise training.
 # At n~50 this is likely the biggest single win available. Download from

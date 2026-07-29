@@ -151,7 +151,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = mamba_modules3D.GAMBAS(
             input_dim=input_nc,
             img_size=img_size,
-            output_dim=1
+            output_dim=1,
+            global_residual=kwargs.get('global_residual', False)
         )
     elif netG == "swin_unetr":
         net = SwinUNETR(img_size=(128,128,128), in_channels=1, out_channels=1, feature_size = 48, use_v2=True)

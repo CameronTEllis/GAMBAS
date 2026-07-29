@@ -40,6 +40,8 @@ GRES="gpu:1"; [ -n "$GPU_TYPE" ] && GRES="gpu:${GPU_TYPE}:1"
 # Warm start and balancing are optional; build the flags conditionally so an
 # empty INIT_FROM does not become --init_from ''.
 TRAIN_EXTRA=""
+# --global_residual defaults ON in sr_options, so only the opt-out needs passing.
+[ "${GLOBAL_RESIDUAL:-1}" = "0" ] && TRAIN_EXTRA="$TRAIN_EXTRA --no_global_residual"
 [ -n "${INIT_FROM:-}" ] && TRAIN_EXTRA="$TRAIN_EXTRA --init_from $INIT_FROM --init_min_coverage $INIT_MIN_COVERAGE"
 [ "${BALANCE_SUBGROUPS:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --balance_subgroups --balance_power $BALANCE_POWER --name_schema $NAME_SCHEMA"
 [ "${RANDOMIZE_DEGRADATION:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --randomize_degradation --apod_range $APOD_RANGE --snr_range $SNR_RANGE --degradation_modes $DEGRADATION_MODES --degradation_p $DEGRADATION_P --target_spacing $TARGET_SPACING"

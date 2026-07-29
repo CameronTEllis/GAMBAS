@@ -236,11 +236,45 @@ class ccMambaWithCNN(nn.Module):
 
 ########Generator############
 class GAMBAS(nn.Module):
-    def __init__(self, input_dim, img_size=224, output_dim=3):
+    def __init__(self, input_dim, img_size=224, output_dim=3,
+                 global_residual=False):
         super(GAMBAS, self).__init__()
         # self.config = config
         output_nc = output_dim
         ngf = 64
+
+        # ------------------------------------------------------------------ #
+        # Optional global (long) skip: y = x + s * G(x).
+        #
+        # As published, GAMBAS has no path from input to output -- the encoder
+        # strides the volume down 4x, nine bottleneck blocks run at that
+        # resolution, and the decoder reconstructs everything from scratch.
+        # That is the right inductive bias for its original task (64 mT ULF
+        # T2w -> 3T-like), where the input and target differ enormously and
+        # the output really must be synthesised.
+        #
+        # It is the wrong bias for 2 mm -> 1 mm on the same scanner, where the
+        # sinc-interpolated input is already ~38 dB from the target. There the
+        # network's job is to add the missing high-frequency band, not to
+        # regenerate the anatomy it was just handed -- and a 4x-strided
+        # bottleneck with no skip discards precisely the fine detail it needs
+        # to preserve, so it has to spend capacity relearning the identity.
+        #
+        # `s` is a learnable scalar initialised to ZERO, so an untrained (or
+        # freshly warm-started) network outputs its input exactly and
+        # validation starts at the sinc baseline rather than 10 dB below it.
+        # Every optimiser step is then measured as improvement on that
+        # baseline instead of a crawl back up to it.
+        #
+        # init_weights() only touches modules whose class name contains
+        # Conv/Linear/BatchNorm3d, so this bare Parameter survives init_net().
+        self.global_residual = bool(global_residual)
+        if self.global_residual:
+            if input_dim != output_dim:
+                raise ValueError(
+                    'global_residual needs input_dim == output_dim, got %d and %d'
+                    % (input_dim, output_dim))
+            self.res_scale = nn.Parameter(torch.zeros(1))
         use_bias = True
         norm_layer = nn.InstanceNorm3d
         padding_type = "replication"
@@ -338,6 +372,7 @@ class GAMBAS(nn.Module):
         setattr(self, "decoder_3", nn.Sequential(*model))
 
     def forward(self, x):
+        inp = x
         # Encoder
         x1 = self.encoder_1(x)
         x2 = self.encoder_2(x1)
@@ -358,6 +393,11 @@ class GAMBAS(nn.Module):
         x = self.decoder_1(x)
         x = self.decoder_2(x)
         x = self.decoder_3(x)
+        if self.global_residual:
+            # Deliberately NOT clamped to [-1, 1] here: clamping would zero the
+            # gradient wherever the sum overshoots, and every consumer already
+            # clips (validate/evaluate do np.clip((pred + 1) / 2, 0, 1)).
+            x = inp + self.res_scale * x
         return x
 
 

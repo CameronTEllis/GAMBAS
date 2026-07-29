@@ -77,7 +77,10 @@ class GambasModel(BaseModel):
         
         self.netG = networks3D.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm, 
                                         not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids,
-                                      **{'img_size': (opt.imageSize, opt.imageSize), 
+                                      **{'img_size': (opt.imageSize, opt.imageSize),
+                                         # getattr: the non-SR entry points
+                                         # (train.py, test.py) never define it.
+                                         'global_residual': getattr(opt, 'global_residual', False),
                                          }
                                       )
         if self.isTrain:

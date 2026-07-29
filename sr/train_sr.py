@@ -48,7 +48,7 @@ from sr import sr_transforms
 from sr.checkpoint_utils import (balance_weights, format_balance, format_report,
                                 match_state_dict)
 from sr.naming import load_name_map, subgroup_of
-from sr.sr_metrics import psnr, ssim3d, mae
+from sr.sr_metrics import psnr, ssim3d, mae, brain_mask
 
 
 # --------------------------------------------------------------------------- #
@@ -358,10 +358,25 @@ def validate(net, opt, device, epoch, writer=None, amp_dtype=None):
         p01 = np.clip((pred + 1) / 2, 0, 1)
         h01 = np.clip((hr + 1) / 2, 0, 1)
         l01 = np.clip((lr + 1) / 2, 0, 1)
+        # Metrics are FOREGROUND-MASKED by default. Only ~45-75% of one of these
+        # volumes is head; in the air outside it the 2 mm input and the 1 mm
+        # target are both ~0 and agree perfectly, which inflates whole-volume
+        # PSNR by 1.5-3.5 dB and pushes SSIM toward 1. Selecting the best
+        # checkpoint on that means partly selecting on empty space. The mask
+        # comes from the ground truth so it is identical for model and baseline.
+        # The unmasked numbers are kept as *_whole for comparability with papers
+        # that report them (most do, usually without saying so).
+        m = brain_mask(h01)
         rows.append({
-            'psnr': psnr(p01, h01), 'ssim': ssim3d(p01, h01), 'l1': mae(p01, h01),
-            'psnr_baseline': psnr(l01, h01), 'ssim_baseline': ssim3d(l01, h01),
-            'l1_baseline': mae(l01, h01),
+            'psnr': psnr(p01[m], h01[m]),
+            'ssim': ssim3d(p01, h01, mask=m),
+            'l1': mae(p01[m], h01[m]),
+            'psnr_baseline': psnr(l01[m], h01[m]),
+            'ssim_baseline': ssim3d(l01, h01, mask=m),
+            'l1_baseline': mae(l01[m], h01[m]),
+            'psnr_whole': psnr(p01, h01),
+            'psnr_baseline_whole': psnr(l01, h01),
+            'fg_frac': float(m.mean()),
         })
         if opt.save_val_predictions:
             out = sitk.GetImageFromArray(np.transpose(p01 * 255.0, (2, 1, 0)))
@@ -375,10 +390,17 @@ def validate(net, opt, device, epoch, writer=None, amp_dtype=None):
         return {}
 
     means = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
-    print('[val] epoch %d  n=%d  PSNR %.3f (sinc %.3f, +%.3f)  SSIM %.4f (sinc %.4f)  L1 %.5f'
+    # Per-volume paired deltas. The mean delta equals the difference of means,
+    # but the RANGE does not follow from it, and it is the useful number here:
+    # the volumes differ several-fold in how much content actually sits above
+    # the 2 mm Nyquist, so a positive mean can hide volumes made worse.
+    d = sorted(r['psnr'] - r['psnr_baseline'] for r in rows)
+    print('[val] epoch %d  n=%d  PSNR %.3f (sinc %.3f, %+.3f)  SSIM %.4f (sinc %.4f)  '
+          'L1 %.5f  [masked, fg %.0f%%]  per-vol delta %+.2f..%+.2f, %d/%d improved'
           % (epoch, len(rows), means['psnr'], means['psnr_baseline'],
              means['psnr'] - means['psnr_baseline'], means['ssim'],
-             means['ssim_baseline'], means['l1']), flush=True)
+             means['ssim_baseline'], means['l1'], 100 * means['fg_frac'],
+             d[0], d[-1], sum(x > 0 for x in d), len(d)), flush=True)
     if writer is not None:
         for k, v in means.items():
             writer.add_scalar('val/' + k, v, epoch)

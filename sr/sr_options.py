@@ -123,6 +123,23 @@ class SROptions(TrainOptions):
             lambda_adv=0.0,
         )
 
+        # ---- architecture ----------------------------------------------------
+        parser.add_argument('--global_residual', action='store_true', default=True,
+                            help='Predict y = x + s*G(x) instead of y = G(x), with s '
+                                 'a learnable scalar initialised to 0. Default ON for '
+                                 'super-resolution and it matters a lot: as published, '
+                                 'GAMBAS strides the volume down 4x and rebuilds it '
+                                 'from the bottleneck with no input->output skip. That '
+                                 'suits its original ULF-to-3T task, where input and '
+                                 'target differ enormously. For 2mm->1mm the sinc input '
+                                 'is already ~38 dB from the target, so the network '
+                                 'should add the missing high-frequency band rather '
+                                 'than regenerate anatomy it was handed. Zero init '
+                                 'means epoch 0 reproduces the sinc baseline exactly.')
+        parser.add_argument('--no_global_residual', dest='global_residual',
+                            action='store_false',
+                            help='Restore the published architecture (no long skip).')
+
         # ---- warm start ------------------------------------------------------
         parser.add_argument('--init_from', type=str, default='',
                             help='Path to a .pth to initialise the GENERATOR from, '

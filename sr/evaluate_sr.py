@@ -57,10 +57,6 @@ from sr.train_sr import sliding_window_predict
 def load_generator(args, device):
     """Build the GAMBAS generator directly and load weights, avoiding the
     option-parsing dance in models/__init__.py."""
-    net = networks3D.define_G(
-        args.input_nc, args.output_nc, args.ngf, args.netG, args.norm,
-        not args.no_dropout, 'normal', 0.02, args.gpu_ids,
-        **{'img_size': (args.imageSize, args.imageSize)})
     path = os.path.join(args.checkpoints_dir, args.name,
                         '%s_net_G.pth' % args.which_epoch)
     if not os.path.exists(path):
@@ -68,6 +64,25 @@ def load_generator(args, device):
     state = torch.load(path, map_location='cpu')
     if hasattr(state, '_metadata'):
         del state._metadata
+
+    # The architecture is DETECTED from the checkpoint, not taken from a flag.
+    # load_state_dict(strict=False) below would otherwise file an unmatched
+    # 'res_scale' under `unexpected` and carry on, evaluating a residual model as
+    # a non-residual one -- silently, and producing nonsense. Reading the key is
+    # the only way this cannot be got wrong from the command line.
+    residual = any(k.split('.')[-1] == 'res_scale' for k in state)
+    if args.global_residual is not None and bool(args.global_residual) != residual:
+        sys.exit('--global_residual=%s contradicts the checkpoint (res_scale %s '
+                 'present in %s). Drop the flag and let it be detected.'
+                 % (args.global_residual, 'is' if residual else 'is not', path))
+    print('architecture: %s (from checkpoint)'
+          % ('global residual y = x + s*G(x)' if residual else 'published, no long skip'))
+
+    net = networks3D.define_G(
+        args.input_nc, args.output_nc, args.ngf, args.netG, args.norm,
+        not args.no_dropout, 'normal', 0.02, args.gpu_ids,
+        **{'img_size': (args.imageSize, args.imageSize),
+           'global_residual': residual})
     target = net.module if isinstance(net, torch.nn.DataParallel) else net
     # InstanceNorm running stats are absent in these checkpoints.
     state = {k: v for k, v in state.items()
@@ -136,6 +151,12 @@ def build_parser():
 
     # network construction (must match training)
     p.add_argument('--netG', default='gambas')
+    # Tri-state on purpose: None = detect from the checkpoint (the default and
+    # the right answer); 0/1 only to assert an expectation and fail loudly if
+    # the checkpoint disagrees.
+    p.add_argument('--global_residual', type=int, default=None, choices=[0, 1],
+                   help='Leave unset to detect from the checkpoint. Set only to '
+                        'assert what you think the checkpoint is.')
     p.add_argument('--input_nc', type=int, default=1)
     p.add_argument('--output_nc', type=int, default=1)
     p.add_argument('--ngf', type=int, default=64)
