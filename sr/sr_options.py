@@ -48,13 +48,31 @@ import os
 from options.train_options import TrainOptions
 
 
-def _triplet(s):
-    parts = [p for p in s.replace(',', ' ').split() if p]
-    if len(parts) == 1:
-        parts = parts * 3
-    if len(parts) != 3:
-        raise argparse.ArgumentTypeError('expected 1 or 3 values, got %r' % s)
-    return [int(float(p)) for p in parts]
+def _expand3(vals, name):
+    """Normalise a 1- or 3-element list to exactly 3.
+
+    These options use `nargs='+', type=int` rather than a single string-parsing
+    `type=`, so that ALL of these work:
+
+        --patch_size 96                    -> [96, 96, 96]
+        --patch_size 128 128 96            -> [128, 128, 96]
+        --patch_size $PATCH_SIZE           (unquoted, word-splits into 3)
+
+    That last form is what the sbatch scripts use and what `check_dataset.py` and
+    `evaluate_sr.py` already accepted (`nargs=3`). An earlier revision used a
+    single-argument `type=` that parsed "128 128 128" as one string, which meant
+    the *unquoted* form -- the one every cluster script and the smoke test used --
+    failed with "unrecognized arguments: 128 128".
+    """
+    if vals is None:
+        return None
+    vals = list(vals)
+    if len(vals) == 1:
+        vals = vals * 3
+    if len(vals) != 3:
+        raise SystemExit('%s: expected 1 or 3 values, got %d (%s)'
+                         % (name, len(vals), vals))
+    return [int(v) for v in vals]
 
 
 class SROptions(TrainOptions):
@@ -71,9 +89,11 @@ class SROptions(TrainOptions):
                 for opt_str in action.option_strings:
                     parser._option_string_actions.pop(opt_str, None)
 
-        parser.add_argument('--patch_size', type=_triplet, default=[128, 128, 128],
-                            help='Training patch size, "128" or "128 128 128". '
-                                 'Must be divisible by 4 (two stride-2 encoders).')
+        parser.add_argument('--patch_size', type=int, nargs='+',
+                            default=[128, 128, 128],
+                            help='Training patch size: one value for a cube, or '
+                                 'three. Must be divisible by 4 (two stride-2 '
+                                 'encoders and two transposed-conv decoders).')
         parser.add_argument('--new_resolution', type=float, nargs=3, default=[1.0, 1.0, 1.0],
                             help='Only used when --resample is true')
 
@@ -147,11 +167,12 @@ class SROptions(TrainOptions):
         # ---- validation -----------------------------------------------------
         parser.add_argument('--val_freq', type=int, default=5,
                             help='Run validation every N epochs (0 disables)')
-        parser.add_argument('--val_patch_size', type=_triplet, default=None,
-                            help='Sliding-window patch for validation '
-                                 '(default: same as --patch_size)')
-        parser.add_argument('--val_stride', type=_triplet, default=None,
-                            help='Sliding-window stride (default: half the patch)')
+        parser.add_argument('--val_patch_size', type=int, nargs='+', default=None,
+                            help='Sliding-window patch for validation: one value '
+                                 'or three (default: same as --patch_size)')
+        parser.add_argument('--val_stride', type=int, nargs='+', default=None,
+                            help='Sliding-window stride: one value or three '
+                                 '(default: half the patch)')
         parser.add_argument('--val_max_volumes', type=int, default=8,
                             help='Validate on at most this many volumes')
         parser.add_argument('--val_metric', type=str, default='psnr',
@@ -235,6 +256,15 @@ class SROptions(TrainOptions):
 
     def parse(self):
         opt = super(SROptions, self).parse()
+
+        # Normalise the 1-or-3 forms to exactly 3 before anything downstream
+        # indexes them. Done here rather than in a `type=` callable so that the
+        # unquoted `--patch_size $PATCH_SIZE` form used by every sbatch script
+        # works, as well as `--patch_size 96`.
+        opt.patch_size = _expand3(opt.patch_size, '--patch_size')
+        opt.val_patch_size = _expand3(opt.val_patch_size, '--val_patch_size')
+        opt.val_stride = _expand3(opt.val_stride, '--val_stride')
+
         if opt.val_patch_size is None:
             opt.val_patch_size = list(opt.patch_size)
         if opt.val_stride is None:
