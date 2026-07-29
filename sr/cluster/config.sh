@@ -70,7 +70,7 @@ export SUBGROUP_REGEX="${SUBGROUP_REGEX:-}"
 export GROUP_BY="${GROUP_BY:-subject}"
 
 # ---- training --------------------------------------------------------------
-export PATCH_SIZE="${PATCH_SIZE:-128 128 128}"
+export PATCH_SIZE="${PATCH_SIZE:-96 96 96}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
 export LAMBDA_L1="${LAMBDA_L1:-100.0}"       # --lambda_A
 # 0.0 = pure L1 regressor. This is the DEFAULT and the right place to start: at
