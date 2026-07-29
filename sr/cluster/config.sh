@@ -11,12 +11,12 @@
 
 # ---- paths -----------------------------------------------------------------
 # Repo checkout (the directory containing train.py, models/, sr/)
-export GAMBAS_ROOT="${GAMBAS_ROOT:-$HOME/code/GAMBAS}"
+export GAMBAS_ROOT="${GAMBAS_ROOT:-$HOME/GAMBAS}"
 
 # Folder of your original 1 mm isotropic anatomicals, named
 #   <id>_<session>_<age>_<t1w|t2w>.nii.gz   e.g. 12345_02_2.2_t1w.nii.gz
 # (age in months, decimal)
-export HR_DIR="${HR_DIR:-/scratch/$USER/data/originals}"
+export HR_DIR="${HR_DIR:-$OAK/projects/soc_neuropipe_infants/data/GAMBAS_upres_test/originals/}"
 
 # Parent for the simulation products. With the default --layout method these are
 # siblings of your originals/, so SIM_DIR is normally the PARENT of HR_DIR:
@@ -28,17 +28,17 @@ export HR_DIR="${HR_DIR:-/scratch/$USER/data/originals}"
 export SIM_DIR="${SIM_DIR:-$(dirname "$HR_DIR")}"
 
 # Where build_sr_dataset.py writes train/ val/ test/
-export DATASET_DIR="${DATASET_DIR:-/scratch/$USER/data/sr_dataset}"
+export DATASET_DIR="${DATASET_DIR:-$SCRATCH/sr_dataset}"
 
 # Checkpoints, logs, tensorboard
-export CKPT_DIR="${CKPT_DIR:-/scratch/$USER/checkpoints}"
+export CKPT_DIR="${CKPT_DIR:-$SCRATCH/checkpoints}"
 export EXP_NAME="${EXP_NAME:-sr_2mm_to_1mm}"
 
 # Evaluation output
-export EVAL_DIR="${EVAL_DIR:-/scratch/$USER/eval/$EXP_NAME}"
+export EVAL_DIR="${EVAL_DIR:-$SCRATCH/eval/$EXP_NAME}"
 
 # SLURM logs
-export LOG_DIR="${LOG_DIR:-/scratch/$USER/slurm_logs}"
+export LOG_DIR="${LOG_DIR:-$SCRATCH/slurm_logs}"
 
 # ---- simulation parameters -------------------------------------------------
 export TARGET_SPACING="${TARGET_SPACING:-2.0 2.0 2.0}"
@@ -125,7 +125,7 @@ export ITERS_PER_EPOCH="${ITERS_PER_EPOCH:-0}"  # >0 = fixed steps/epoch
 
 # ---- SLURM resource requests ----------------------------------------------
 export SLURM_ACCOUNT="${SLURM_ACCOUNT:-}"          # e.g. myproject
-export CPU_PARTITION="${CPU_PARTITION:-cpu}"
+export CPU_PARTITION="${CPU_PARTITION:-cte}"
 export GPU_PARTITION="${GPU_PARTITION:-gpu}"
 export GPU_TYPE="${GPU_TYPE:-}"                    # e.g. a100 -> gres=gpu:a100:1
 
@@ -146,7 +146,7 @@ export EVAL_MEM="${EVAL_MEM:-32G}"
 # Pick ONE of the three styles below by setting ENV_STYLE.
 export ENV_STYLE="${ENV_STYLE:-conda}"             # conda | venv | container
 
-export CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
+export CONDA_SH="${CONDA_SH:-$OAK/shared_resources/pkgs/miniconda3/etc/profile.d/conda.sh}"
 export CONDA_ENV="${CONDA_ENV:-gambas}"
 
 export VENV_PATH="${VENV_PATH:-$HOME/venvs/gambas}"
