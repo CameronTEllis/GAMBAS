@@ -86,10 +86,19 @@ class GambasModel(BaseModel):
             self.netD = networks3D.define_D(opt.input_nc + opt.output_nc, opt.ndf, opt.netD, 
                                             opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, opt.init_gain, self.gpu_ids)
 
-        if not self.isTrain or opt.continue_train:
-            self.load_network(self.netG, "G", opt.which_epoch)
-            if self.isTrain:
-                self.load_network(self.netD, "D", opt.which_epoch)
+        # NOTE: this block used to call self.load_network(...) -- singular -- which
+        # is not defined on BaseModel (or anywhere in the repo), so ANY use of
+        # --continue_train with --model gambas raised AttributeError before
+        # training could start. It is also redundant: BaseModel.setup(), which
+        # runs immediately after initialize(), already calls load_networks() (plural,
+        # and correct) under exactly the same condition. ea_gan_model.py and
+        # resvit_model.py have these same two lines commented out for this reason;
+        # gambas_model.py was missed. Left here as a comment to match its siblings.
+        #
+        # if not self.isTrain or opt.continue_train:
+        #     self.load_network(self.netG, "G", opt.which_epoch)
+        #     if self.isTrain:
+        #         self.load_network(self.netD, "D", opt.which_epoch)
 
         if self.isTrain:
             self.fake_AB_pool = ImagePool(opt.pool_size)
@@ -146,11 +155,21 @@ class GambasModel(BaseModel):
         self.loss_D.backward()
 
     def backward_G(self):
-        # First, G(A) should fake the discriminator
-        fake_AB = torch.cat((self.real_A, self.fake_B), 1)
-        # fake_AB = torch.cat((self.real_A, self.fake_B, self.fake_sobel), 1)
-        pred_fake = self.netD(fake_AB)
-        self.loss_G_GAN = self.criterionGAN(pred_fake, True)
+        # First, G(A) should fake the discriminator.
+        # --lambda_adv was declared in modify_commandline_options but never
+        # applied here, so setting it had no effect (resvit_model.py does apply
+        # it). Applied now, which makes --lambda_adv 0.0 a pure L1 regressor --
+        # the right baseline for a super-resolution task, where a strong
+        # adversarial term invents plausible-but-wrong anatomical detail.
+        lambda_adv = getattr(self.opt, 'lambda_adv', 1.0)
+        if lambda_adv == 0:
+            # Skip the discriminator forward pass too, not just its gradient.
+            self.loss_G_GAN = torch.zeros((), device=self.device)
+        else:
+            fake_AB = torch.cat((self.real_A, self.fake_B), 1)
+            # fake_AB = torch.cat((self.real_A, self.fake_B, self.fake_sobel), 1)
+            pred_fake = self.netD(fake_AB)
+            self.loss_G_GAN = self.criterionGAN(pred_fake, True) * lambda_adv
         # Second, G(A) = B
         self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
         # Third, perceptual loss: (G(A)) = (B)
@@ -169,7 +188,13 @@ class GambasModel(BaseModel):
         self.optimizer_G.zero_grad()
         self.backward_G()
         self.optimizer_G.step()
-        # D
+        # D -- skipped entirely when the adversarial term is switched off, which
+        # saves the discriminator's activations and roughly a third of the step
+        # time. Without this, --lambda_adv 0 still pays for a discriminator whose
+        # gradients never reach the generator.
+        if getattr(self.opt, 'lambda_adv', 1.0) == 0:
+            self.loss_D = torch.zeros((), device=self.device)
+            return
         self.set_requires_grad(self.netD, True)
         self.optimizer_D.zero_grad()
         self.backward_D()

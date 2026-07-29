@@ -98,14 +98,26 @@ class BaseOptions():
         self.print_options(opt)
 
         # set gpu ids
-        str_ids = list(opt.gpu_ids)
-        # str_ids.remove(',')
+        # Previously this did `list(opt.gpu_ids)` and int() on each CHARACTER,
+        # so '0' worked but '-1' (CPU) crashed on int('-') and '0,1' crashed on
+        # int(','). Split on commas/whitespace instead, and treat any negative
+        # id as "use CPU".
+        if isinstance(opt.gpu_ids, str):
+            tokens = [t for t in opt.gpu_ids.replace(',', ' ').split() if t]
+        else:
+            tokens = list(opt.gpu_ids)
         opt.gpu_ids = []
-        for str_id in str_ids:
-            id = int(str_id)
-            if id >= 0:
-                opt.gpu_ids.append(id)
+        for tok in tokens:
+            gid = int(tok)
+            if gid >= 0:
+                opt.gpu_ids.append(gid)
         if len(opt.gpu_ids) > 0:
+            if not torch.cuda.is_available():
+                raise SystemExit(
+                    'Requested --gpu_ids %s but torch.cuda.is_available() is '
+                    'False. Pass --gpu_ids -1 to run on CPU (note: mamba_ssm '
+                    'requires CUDA, so the gambas generator will not run).'
+                    % opt.gpu_ids)
             torch.cuda.set_device(opt.gpu_ids[0])
         
         #device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
