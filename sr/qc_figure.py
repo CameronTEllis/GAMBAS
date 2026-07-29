@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 import os
 import sys
 
@@ -34,6 +35,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+from sr.naming import age_of, subgroup_of
 from sr.sr_metrics import (radial_power_spectrum, axis_power_spectrum, psnr,
                            ssim3d)
 
@@ -199,7 +201,25 @@ def main(argv=None):
     p.add_argument('--lr_dir', default=None, help='Override the on-HR-grid dir')
     p.add_argument('--native_dir', default=None, help='Override the native 2 mm dir')
     p.add_argument('--hr_dir', default=None, help='Override the HR target dir')
-    p.add_argument('--n', type=int, default=5, help='0 = all')
+    p.add_argument('--n', type=int, default=5,
+                   help='Cap on how many figures to make. 0 = all. Applied AFTER '
+                        'the filters below.')
+    p.add_argument('--include', nargs='+', default=None,
+                   help='Only these volumes. Each value is matched against the '
+                        'filename stem: a bare string matches as a substring '
+                        '(--include 12345), and shell wildcards work '
+                        "(--include '12345_*_t1w'). Repeatable.")
+    p.add_argument('--weighting', default=None,
+                   help="Only this weighting, e.g. t1w or t2w (case-insensitive)")
+    p.add_argument('--age_range', type=float, nargs=2, default=None,
+                   help='Only volumes whose age field falls in [LO, HI] months, '
+                        'e.g. --age_range 0 6 for the youngest')
+    p.add_argument('--extremes', action='store_true',
+                   help='Just the youngest and oldest volume by age field. Handy '
+                        'for checking FOV and normalisation across a wide '
+                        'developmental range.')
+    p.add_argument('--name_schema', default='id,session,age,weighting',
+                   help='Field order, used by --weighting/--age_range/--extremes')
     p.add_argument('--target_spacing', type=float, default=2.0)
     p.add_argument('--source_spacing', type=float, default=1.0)
     args = p.parse_args(argv)
@@ -222,8 +242,55 @@ def main(argv=None):
         sys.exit('%s missing -- rerun the simulator with --copy_hr' % hr_dir)
 
     names = sorted(f for f in os.listdir(up_dir) if not f.startswith('.'))
-    if args.n:
+    total = len(names)
+    stem_of = lambda f: f.replace('.nii.gz', '').replace('.nii', '')
+
+    # ---- filters, applied before --n so the cap never hides your selection ---
+    if args.include:
+        keep = []
+        for f in names:
+            s = stem_of(f)
+            for pat in args.include:
+                # A pattern with no wildcard is treated as a substring, which is
+                # what you want for "just show me participant 12345".
+                hit = (fnmatch.fnmatch(s, pat)
+                       if any(c in pat for c in '*?[') else pat in s)
+                if hit:
+                    keep.append(f)
+                    break
+        names = keep
+
+    if args.weighting:
+        want = args.weighting.lower()
+        names = [f for f in names
+                 if subgroup_of(stem_of(f), schema=args.name_schema) == want]
+
+    if args.age_range or args.extremes:
+        aged = []
+        for f in names:
+            _, num = age_of(stem_of(f), None, args.name_schema)
+            if num is not None:
+                aged.append((num, f))
+        if not aged:
+            sys.exit('--age_range/--extremes need a parseable age field; none '
+                     'found with --name_schema %s' % args.name_schema)
+        if args.age_range:
+            lo, hi = sorted(args.age_range)
+            aged = [(a, f) for a, f in aged if lo <= a <= hi]
+        aged.sort()
+        if args.extremes:
+            aged = [aged[0]] + ([aged[-1]] if len(aged) > 1 else [])
+        names = [f for _, f in aged]
+
+    if not names:
+        sys.exit('no volumes matched. %d available in %s; check --include / '
+                 '--weighting / --age_range.' % (total, up_dir))
+
+    n_matched = len(names)
+    if args.n and not args.extremes:
         names = names[:args.n]
+    print('%d of %d volume(s) matched; making %d figure(s)'
+          % (n_matched, total, len(names)))
     os.makedirs(args.out_dir, exist_ok=True)
 
     for fn in names:
