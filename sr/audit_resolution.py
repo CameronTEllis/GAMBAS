@@ -208,6 +208,19 @@ def main(argv=None):
                         'that decides whether a volume can demonstrate anything.')
     p.add_argument('--target_spacing', type=float, nargs=3, default=[2.0, 2.0, 2.0],
                    help='Simulated acquisition spacing for --degrade_check')
+    # 40.0 rather than 39.0: on this cohort (median 37.1 dB, range 34.2-41.6) a
+    # 39 dB cut excludes 16/50 volumes including 8 of the 14 t2w, leaving too few
+    # t2w to report a subgroup on at all. 40 dB excludes 10/50 and keeps 10 t2w.
+    # NOTE this is selection on task DIFFICULTY, measured from the targets alone
+    # with no model involved, so it is not circular and can be fixed before any
+    # results are seen -- but it must be fixed before, and stated.
+    p.add_argument('--flag_db_above', type=float, default=40.0,
+                   help='With --degrade_check, flag volumes whose measured sinc '
+                        'baseline is at or above this many dB -- there is too '
+                        'little left to restore for them to demonstrate anything. '
+                        'Takes precedence over --flag_below, which is only a proxy. '
+                        'Absolute and in the units the model is scored in, so it '
+                        'transfers across cohorts, unlike the hf025 ratio.')
     a = p.parse_args(argv)
 
     names = sorted(f for f in os.listdir(a.in_dir)
@@ -251,12 +264,37 @@ def main(argv=None):
     hf = np.array([r['hf025'] for r in rows])
     med = max(float(np.median(hf)), 1e-12)   # guard the rel.med division
     thresh = a.flag_below * med
-    for r in rows:
-        r['flag'] = 'LOW' if r['hf025'] < thresh else ''
 
-    rows.sort(key=lambda r: r['hf025'])
-    print('\ncohort median hf025 = %.5f   flag threshold = %.5f (%.2fx median)\n'
-          % (med, thresh, a.flag_below))
+    # Flag on MEASURED headroom when we have it. hf025 is a relative spectral
+    # fraction and turned out to be a poor proxy: on this cohort it flagged
+    # volumes at 37.2 and 37.6 dB while leaving others at 40.4 and 41.6 dB
+    # unflagged -- i.e. it excluded volumes with MORE headroom than ones it
+    # kept. sinc_dB is the baseline the model is actually scored against, so it
+    # is the criterion that matters. hf025 remains the fallback when
+    # --degrade_check was not run.
+    use_db = a.degrade_check and any(np.isfinite(r.get('sinc_db', np.nan))
+                                     for r in rows)
+    if use_db:
+        for r in rows:
+            v = r.get('sinc_db', float('nan'))
+            r['flag'] = 'LOW' if (np.isfinite(v) and v >= a.flag_db_above) else ''
+    else:
+        for r in rows:
+            r['flag'] = 'LOW' if r['hf025'] < thresh else ''
+
+    rows.sort(key=lambda r: (-r['sinc_db']) if use_db else r['hf025'])
+    if use_db:
+        db = np.array([r['sinc_db'] for r in rows if np.isfinite(r['sinc_db'])])
+        print('\nflagging on MEASURED headroom: sinc baseline >= %.1f dB'
+              % a.flag_db_above)
+        print('cohort sinc baseline: median %.2f dB, range %.2f..%.2f  '
+              '(hf025 median %.5f, shown but not used for the flag)\n'
+              % (np.median(db), db.min(), db.max(), med))
+    else:
+        print('\ncohort median hf025 = %.5f   flag threshold = %.5f (%.2fx median)'
+              % (med, thresh, a.flag_below))
+        print('(proxy criterion -- rerun with --degrade_check to flag on the '
+              'measured baseline instead)\n')
     dbcol = '%8s' % 'sinc_dB' if a.degrade_check else ''
     hdr = ('%-34s %4s %7s %8s %7s %7s %7s %7s %6s%s %5s'
            % ('stem', 'wt', 'hf025', 'rel.med', 'f99_x', 'f99_y', 'f99_z',
