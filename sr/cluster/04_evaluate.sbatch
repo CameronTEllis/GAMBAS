@@ -35,6 +35,7 @@ PY -m sr.evaluate_sr \
   --lowres_native_dir "$SIM_DIR/lowres-$METHOD_TAG-native" \
   --name_schema "$NAME_SCHEMA" \
   --patch_size $PATCH_SIZE \
+  ${EXCLUDE_LIST:+$([ -f "$EXCLUDE_LIST" ] && echo "--exclude_list $EXCLUDE_LIST")} \
   --save_predictions
 
 echo "done: $(date)"

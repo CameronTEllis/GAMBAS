@@ -175,7 +175,22 @@ def grouped_quota_split(groups, group_strata, quotas, seed=0, taken=None):
             over = sum(max(0, gs[s] - max(0, remaining[s])) for s in gs)
             if useful == 0:
                 continue
-            key = (-useful, over, len(groups[g]), g)
+            # Minimise NET misfit (over - useful), not raw usefulness.
+            #
+            # The previous key was (-useful, over, ...), which maximised useful
+            # and used overshoot only as a tie-break. That is degenerate when one
+            # group is large: a 22-volume longitudinal subject scores
+            # useful = min(17,8) + min(5,3) = 11, the maximum attainable, so it
+            # beat every 1-volume group (useful = 1) despite overshooting by
+            # (17-8) + (5-3) = 11. Real consequence: a requested 8 t1w + 3 t2w
+            # test set came back as 17 t1w + 5 t2w -- all 22 volumes of a SINGLE
+            # subject, making every held-out score one infant's anatomy and one
+            # acquisition protocol.
+            #
+            # over - useful ranks that group at 11 - 11 = 0 while a single t1w
+            # volume scores 0 - 1 = -1, so small groups fill the quota first and
+            # a large group is taken only when it genuinely fits.
+            key = (over - useful, over, -useful, len(groups[g]), g)
             if best_key is None or key < best_key:
                 best_key, best_g = key, g
         if best_g is None:
@@ -186,6 +201,22 @@ def grouped_quota_split(groups, group_strata, quotas, seed=0, taken=None):
             remaining[s] -= n
 
     unmet = {s: n for s, n in remaining.items() if n > 0}
+
+    # Belt and braces: even with the corrected key, a cohort where one group is
+    # most of the data can still end up dominating a split (e.g. if the quota is
+    # large enough that no combination of small groups fills it). That silently
+    # turns "held-out test set" into "one subject", so say so loudly rather than
+    # letting it pass as a normal split.
+    if chosen:
+        n_tot = sum(len(groups[g]) for g in chosen)
+        big = max(chosen, key=lambda g: len(groups[g]))
+        share = len(groups[big]) / max(n_tot, 1)
+        if share > 0.5 and len(chosen) > 1 or (len(chosen) == 1 and n_tot > 3):
+            print('WARNING: group %r supplies %d of %d volumes (%.0f%%) in this '
+                  'split. Held-out scores will mostly describe that one subject '
+                  'and its acquisition protocol, not the cohort. Consider '
+                  '--group_by session, or smaller --test_counts.'
+                  % (big, len(groups[big]), n_tot, 100 * share), file=sys.stderr)
     return chosen, unmet
 
 

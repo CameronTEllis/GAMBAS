@@ -138,6 +138,21 @@ export DEGRADATION_P="${DEGRADATION_P:-1.0}"
 # ---- subgroup balancing ----------------------------------------------------
 # Equalise the t1w/t2w sampling imbalance. 1 = on.
 export BALANCE_SUBGROUPS="${BALANCE_SUBGROUPS:-1}"
+
+# Cap how much of the sampled training mass any ONE subject may supply (0 = off).
+# This cohort is 50 volumes / 27 subjects, but ps-MRI-i01 alone contributes 22 of
+# them -- 44% of the cohort and 65% of the dev training set -- and it is also the
+# only series with anisotropic (~1.6x coarser z) resolution. Without a cap most
+# optimiser steps go on one infant's anatomy and one acquisition protocol.
+# BALANCE_SUBGROUPS cannot address it: that subject spans both t1w and t2w.
+# Measured effect at 0.25: ps-MRI-i01 drops 63.3% -> 25.0% of sampled mass, and
+# the t2w share incidentally rises 37.5% -> 42.3% (that subject is mostly t1w).
+export CAP_SUBJECT_SHARE="${CAP_SUBJECT_SHARE:-0.25}"
+
+# Optional list of stems with too little headroom above the simulated Nyquist to
+# demonstrate anything (generate with sr.audit_resolution --exclude_list). They
+# stay in TRAINING but are held out of the headline eval summary. Empty = off.
+export EXCLUDE_LIST="${EXCLUDE_LIST:-$SIM_DIR/low_headroom.txt}"
 # 0 = natural frequency, 1 = full balance, 0.5 = sqrt (recommended). On a 38/14
 # split, full balance revisits each t2w volume 2.71x as often; sqrt gives 1.65x.
 export BALANCE_POWER="${BALANCE_POWER:-0.5}"

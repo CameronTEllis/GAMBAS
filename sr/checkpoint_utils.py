@@ -196,6 +196,87 @@ def balance_weights(labels, power=1.0, cap=None):
     return weights, info
 
 
+def cap_group_share(weights, groups, cap, iters=200, tol=1e-9):
+    """Rescale `weights` so no group in `groups` exceeds `cap` of the sampled mass.
+
+    Motivating case: a longitudinal cohort where one subject supplies 22 of 50
+    volumes. Subgroup (t1w/t2w) balancing does nothing about this -- that subject
+    spans both weightings -- so the model spends most of its steps on one
+    individual's anatomy and, worse, on one acquisition protocol.
+
+    Water-filling: cap the offenders, renormalise, repeat. Renormalising raises
+    everyone else's share and can push a second group over the line, so a single
+    pass is not enough; iterating converges because the total mass held by
+    over-cap groups is non-increasing.
+
+    `cap` below 1/n_groups is infeasible (the shares must sum to 1), in which
+    case the shares converge to uniform and `info['feasible']` is False.
+
+    Returns (weights, info). Weights are normalised to sum to 1.
+    """
+    from collections import defaultdict
+
+    n = len(weights)
+    if n == 0:
+        return [], {'cap': cap, 'feasible': True, 'iters': 0, 'group_share': {}}
+    idx = defaultdict(list)
+    for i, g in enumerate(groups):
+        idx[g].append(i)
+    cap = float(cap)
+    feasible = cap >= 1.0 / len(idx) - tol
+
+    w = [float(x) for x in weights]
+    tot = sum(w) or 1.0
+    w = [x / tot for x in w]
+
+    used = 0
+    for used in range(1, iters + 1):
+        share = {g: sum(w[i] for i in ii) for g, ii in idx.items()}
+        over = [g for g, s in share.items() if s > cap + tol]
+        if not over:
+            used -= 1
+            break
+        for g in over:
+            s = share[g]
+            if s <= 0:
+                continue
+            f = cap / s
+            for i in idx[g]:
+                w[i] *= f
+        tot = sum(w) or 1.0
+        w = [x / tot for x in w]
+
+    share = {g: sum(w[i] for i in ii) for g, ii in idx.items()}
+    info = {'cap': cap,
+            'feasible': feasible,
+            'n_groups': len(idx),
+            'iters': used,
+            'group_share': share,
+            'natural_group_share': {g: len(ii) / n for g, ii in idx.items()},
+            'max_share': max(share.values()) if share else 0.0,
+            'capped': sorted(g for g, s in share.items() if s > cap - 1e-6)}
+    return w, info
+
+
+def format_group_cap(info, top=6):
+    lines = ['subject share cap (--cap_subject_share %.2f):' % info.get('cap', 0)]
+    if not info.get('feasible', True):
+        lines.append('  !! cap %.3f is below 1/%d = %.3f and cannot be met; shares '
+                     'converge to uniform instead.'
+                     % (info['cap'], info['n_groups'], 1.0 / info['n_groups']))
+    nat = info.get('natural_group_share', {})
+    shr = info.get('group_share', {})
+    order = sorted(shr, key=lambda g: -nat.get(g, 0))[:top]
+    lines.append('  %-18s %14s %14s' % ('subject', 'natural share', 'sampled share'))
+    for g in order:
+        lines.append('  %-18s %13.1f%% %13.1f%%'
+                     % (str(g)[:18], 100 * nat.get(g, 0), 100 * shr.get(g, 0)))
+    if len(shr) > top:
+        lines.append('  ... %d more subjects, max sampled share %.1f%%'
+                     % (len(shr) - top, 100 * info.get('max_share', 0)))
+    return '\n'.join(lines)
+
+
 def format_balance(info):
     lines = ['subgroup sampling (--balance_power %.2f):' % info.get('power', 0.0)]
     lines.append('  %-10s %6s %14s %14s' % ('subgroup', 'n', 'natural share',

@@ -45,9 +45,10 @@ import utils.NiftiDataset as NiftiDataset
 from models import create_model
 from sr.sr_options import SROptions
 from sr import sr_transforms
-from sr.checkpoint_utils import (balance_weights, format_balance, format_report,
-                                match_state_dict)
-from sr.naming import load_name_map, subgroup_of
+from sr.checkpoint_utils import (balance_weights, cap_group_share, format_balance,
+                                 format_group_cap, format_report,
+                                 match_state_dict)
+from sr.naming import load_name_map, subgroup_of, subject_of
 from sr.sr_metrics import psnr, ssim3d, mae, brain_mask
 
 
@@ -181,12 +182,16 @@ def warm_start(net, path, tag, min_coverage, allow_partial):
 # Subgroup-balanced sampling
 # --------------------------------------------------------------------------- #
 
-def subgroup_labels_for(train_set, opt):
+def subgroup_labels_for(train_set, opt, return_subjects=False):
     """Subgroup label per training volume, in dataset order.
 
     The dataset builder renumbers files to 0.nii.gz, so the label has to come back
     through manifest.json. Returns None when it cannot be resolved, so the caller
     can fall back rather than silently balancing on garbage.
+
+    With return_subjects, returns (labels, subjects) so the caller can cap any one
+    subject's share as well as balance the weightings -- two different problems
+    that need the same name resolution.
     """
     name_map = load_name_map(opt.data_path,
                              warn=lambda m: print('WARNING: ' + m,
@@ -195,8 +200,9 @@ def subgroup_labels_for(train_set, opt):
         print('WARNING: --balance_subgroups needs manifest.json next to '
               '%s to recover the original filenames; none found. Falling back to '
               'unbalanced sampling.' % opt.data_path, file=sys.stderr)
-        return None
+        return (None, None) if return_subjects else None
     labels = []
+    originals = []
     for p in train_set.images_list:
         stem_on_disk = os.path.basename(p)
         for e in ('.nii.gz', '.nii'):
@@ -204,16 +210,23 @@ def subgroup_labels_for(train_set, opt):
                 stem_on_disk = stem_on_disk[: -len(e)]
                 break
         original = name_map.get(stem_on_disk, stem_on_disk)
+        originals.append(original)
         labels.append(subgroup_of(original, schema=opt.name_schema))
-    if len(set(labels)) < 2:
-        print('WARNING: --balance_subgroups found only one subgroup (%s); nothing '
-              'to balance.' % set(labels), file=sys.stderr)
-        return None
     if 'unknown' in labels:
         n = labels.count('unknown')
         print('WARNING: %d training volume(s) have no subgroup label. Check '
               '--name_schema. They form their own "unknown" stratum.' % n,
               file=sys.stderr)
+    if return_subjects:
+        subjects = [subject_of(o, schema=opt.name_schema) for o in originals]
+        # NOTE: only the subgroup count gates the weighting balance. A single
+        # subgroup still leaves subject capping worth doing, so the caller
+        # decides -- returning None here would silently disable both.
+        return labels, subjects
+    if len(set(labels)) < 2:
+        print('WARNING: --balance_subgroups found only one subgroup (%s); nothing '
+              'to balance.' % set(labels), file=sys.stderr)
+        return None
     return labels
 
 
@@ -222,12 +235,34 @@ def build_sampler(opt, train_set):
     n = len(train_set)
     num_samples = opt.iters_per_epoch if opt.iters_per_epoch > 0 else n
 
-    if opt.balance_subgroups:
-        labels = subgroup_labels_for(train_set, opt)
+    cap = float(getattr(opt, 'cap_subject_share', 0.0) or 0.0)
+    if opt.balance_subgroups or cap > 0:
+        labels, subjects = subgroup_labels_for(train_set, opt, return_subjects=True)
         if labels is not None:
-            weights, info = balance_weights(labels, opt.balance_power,
-                                            opt.balance_cap)
-            print(format_balance(info), flush=True)
+            weights = [1.0] * len(labels)
+            if opt.balance_subgroups and len(set(labels)) >= 2:
+                weights, info = balance_weights(labels, opt.balance_power,
+                                                opt.balance_cap)
+                print(format_balance(info), flush=True)
+            elif opt.balance_subgroups:
+                print('WARNING: --balance_subgroups found only one subgroup (%s); '
+                      'nothing to balance.' % set(labels), file=sys.stderr)
+            # Subject capping runs AFTER weighting balance and renormalises, so
+            # it perturbs the subgroup shares. That is unavoidable -- the two
+            # constraints are not independent when a subject spans both
+            # weightings -- so the achieved subgroup shares are reprinted below
+            # rather than left as the pre-cap promise.
+            if cap > 0 and subjects is not None:
+                weights, cinfo = cap_group_share(weights, subjects, cap)
+                print(format_group_cap(cinfo), flush=True)
+                if opt.balance_subgroups and len(set(labels)) >= 2:
+                    tot = sum(weights) or 1.0
+                    ach = {}
+                    for w, l in zip(weights, labels):
+                        ach[l] = ach.get(l, 0.0) + w / tot
+                    print('  subgroup share after the cap: %s'
+                          % ', '.join('%s %.1f%%' % (k, 100 * v)
+                                      for k, v in sorted(ach.items())), flush=True)
             return torch.utils.data.WeightedRandomSampler(
                 weights=torch.as_tensor(weights, dtype=torch.double),
                 num_samples=num_samples, replacement=True)

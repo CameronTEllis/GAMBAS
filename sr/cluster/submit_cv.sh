@@ -44,7 +44,14 @@ TRAIN_EXTRA=""
 [ "${GLOBAL_RESIDUAL:-1}" = "0" ] && TRAIN_EXTRA="$TRAIN_EXTRA --no_global_residual"
 [ -n "${INIT_FROM:-}" ] && TRAIN_EXTRA="$TRAIN_EXTRA --init_from $INIT_FROM --init_min_coverage $INIT_MIN_COVERAGE"
 [ "${BALANCE_SUBGROUPS:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --balance_subgroups --balance_power $BALANCE_POWER --name_schema $NAME_SCHEMA"
+# Needs --name_schema too, which the line above supplies only when balancing is on.
+[ "${CAP_SUBJECT_SHARE:-0}" != "0" ] && TRAIN_EXTRA="$TRAIN_EXTRA --cap_subject_share $CAP_SUBJECT_SHARE --name_schema $NAME_SCHEMA"
 [ "${RANDOMIZE_DEGRADATION:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --randomize_degradation --apod_range $APOD_RANGE --snr_range $SNR_RANGE --degradation_modes $DEGRADATION_MODES --degradation_p $DEGRADATION_P --target_spacing $TARGET_SPACING"
+
+# Only pass --exclude_list when the file actually exists: evaluate_sr treats a
+# missing path as a hard error, and the list is optional.
+EVAL_EXTRA=""
+[ -n "${EXCLUDE_LIST:-}" ] && [ -f "${EXCLUDE_LIST}" ] && EVAL_EXTRA="--exclude_list $EXCLUDE_LIST"
 
 NAME_OPTS="--name_schema $NAME_SCHEMA"
 [ -n "${SUBJECT_REGEX:-}" ]  && NAME_OPTS="$NAME_OPTS --subject_regex $SUBJECT_REGEX"
@@ -152,7 +159,7 @@ activate_env; cd '$GAMBAS_ROOT'
 PY -m sr.evaluate_sr --test_path '$DS/test' --checkpoints_dir '$CKPT_DIR' \
   --name '$NAME' --which_epoch '${WHICH_EPOCH:-best}' --out_dir '$EV' \
   --lowres_native_dir '$SIM_DIR/lowres-$METHOD_TAG-native' --patch_size $PATCH_SIZE \
-  --fold '$FOLD' --name_schema '$NAME_SCHEMA' \
+  --fold '$FOLD' --name_schema '$NAME_SCHEMA' $EVAL_EXTRA \
   --save_predictions")
   EVAL_DEPS+=("$JE")
 done

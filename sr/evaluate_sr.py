@@ -151,6 +151,15 @@ def build_parser():
 
     # network construction (must match training)
     p.add_argument('--netG', default='gambas')
+    p.add_argument('--exclude_list', default='',
+                   help='File of stems (one per line, e.g. the --exclude_list '
+                        'output of sr.audit_resolution) with too little headroom '
+                        'above the simulated Nyquist to demonstrate anything. They '
+                        'are still evaluated and still written to per_volume.csv '
+                        'with low_headroom=1, but are held out of the headline '
+                        'summary and reported in their own LOW_HEADROOM block. '
+                        'Keeps them in training while stopping them from pulling '
+                        'the reported baseline toward ~42 dB.')
     # Tri-state on purpose: None = detect from the checkpoint (the default and
     # the right answer); 0/1 only to assert an expectation and fail loudly if
     # the checkpoint disagrees.
@@ -203,6 +212,21 @@ def main(argv=None):
               'on-disk filenames. If the dataset was renumbered, every volume '
               'will come out "unknown".', file=sys.stderr)
 
+    # Volumes with negligible headroom above the simulated Nyquist. They stay in
+    # training (they still produce gradient) but must not drive the reported
+    # numbers: for them the sinc input is already ~the target, so they push the
+    # baseline toward 42 dB and compress every delta toward zero regardless of
+    # how good the model is. Marked and reported separately rather than deleted,
+    # so the exclusion is visible in per_volume.csv instead of implicit.
+    low_headroom = set()
+    if args.exclude_list:
+        if not os.path.exists(args.exclude_list):
+            sys.exit('--exclude_list not found: %s' % args.exclude_list)
+        with open(args.exclude_list) as fh:
+            low_headroom = {ln.strip() for ln in fh if ln.strip()}
+        print('low-headroom list: %d stem(s) from %s'
+              % (len(low_headroom), args.exclude_list))
+
     rows = []
     spectra = []
 
@@ -225,7 +249,8 @@ def main(argv=None):
         row = {'volume': name, 'stem': stem, 'subgroup': sub, 'fold': args.fold,
                'subject': subject_of(stem, None, args.name_schema),
                'session': session_of(stem, None, args.name_schema),
-               'age': age_tok, 'age_num': ('' if age_num is None else age_num)}
+               'age': age_tok, 'age_num': ('' if age_num is None else age_num),
+               'low_headroom': int(stem in low_headroom)}
         for tag, arr in (('pred', p01), ('sinc', l01)):
             m = sr_metrics.all_metrics(arr, h01, mask=mask)
             for k, v in m.items():
@@ -274,8 +299,10 @@ def main(argv=None):
         sys.exit('nothing evaluated')
 
     # ---- write per-volume ----------------------------------------------------
+    # 'low_headroom' belongs in lead, not in metric_keys -- otherwise it would be
+    # summarised as though it were a metric and appear in summary.csv as a mean.
     lead = ['volume', 'stem', 'subject', 'session', 'subgroup', 'age',
-            'age_num', 'fold']
+            'age_num', 'fold', 'low_headroom']
     keys = lead + sorted(k for k in rows[0] if k not in lead)
     with open(os.path.join(args.out_dir, 'per_volume.csv'), 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
@@ -285,12 +312,30 @@ def main(argv=None):
     metric_keys = [k for k in keys if k not in lead]
 
     # ---- summary, pooled and per subgroup ------------------------------------
-    subgroups = sorted({r['subgroup'] for r in rows})
+    # Headline numbers come from the volumes that HAVE headroom. The excluded
+    # ones get their own 'LOW_HEADROOM' block so nothing is hidden.
+    scored = [r for r in rows if not r['low_headroom']]
+    dropped = [r for r in rows if r['low_headroom']]
+    if dropped and not scored:
+        print('WARNING: every test volume is on the low-headroom list; reporting '
+              'all of them rather than nothing.')
+        scored, dropped = rows, []
+    if dropped:
+        print('excluded %d/%d test volume(s) from the headline summary as '
+              'low-headroom: %s' % (len(dropped), len(rows),
+                                    ', '.join(r['stem'] for r in dropped)))
+
+    subgroups = sorted({r['subgroup'] for r in scored})
+    blocks = [('ALL', scored)]
+    if len(subgroups) > 1:
+        blocks += [(sg, [r for r in scored if r['subgroup'] == sg])
+                   for sg in subgroups]
+    if dropped:
+        blocks.append(('LOW_HEADROOM', dropped))
     with open(os.path.join(args.out_dir, 'summary.csv'), 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['subgroup', 'metric', 'mean', 'std', 'median', 'n'])
-        for sg in ['ALL'] + (subgroups if len(subgroups) > 1 else []):
-            sel = rows if sg == 'ALL' else [r for r in rows if r['subgroup'] == sg]
+        for sg, sel in blocks:
             for k in metric_keys:
                 vals = np.array([r[k] for r in sel
                                  if k in r and np.isfinite(r[k])], dtype=float)
@@ -325,11 +370,21 @@ def main(argv=None):
               % ('target', '-', '-', '-', mean('hf_energy_target', sel)))
         print('PSNR gain over sinc: %+.3f dB'
               % (mean('pred_psnr', sel) - mean('sinc_psnr', sel)))
+        # Paired per-volume deltas. The mean delta equals the difference of the
+        # means, but the range and the win count do not follow from it, and with
+        # headroom varying several-fold across this cohort a positive mean can
+        # hide volumes the model actively degraded.
+        d = sorted(r['pred_psnr'] - r['sinc_psnr'] for r in sel
+                   if np.isfinite(r.get('pred_psnr', np.nan))
+                   and np.isfinite(r.get('sinc_psnr', np.nan)))
+        if d:
+            print('  per-volume delta: %+.3f .. %+.3f dB, %d/%d improved'
+                  % (d[0], d[-1], sum(x > 0 for x in d), len(d)))
 
-    block('ALL', rows)
+    block('ALL', scored)
     if len(subgroups) > 1:
         for sg in subgroups:
-            block(sg, [r for r in rows if r['subgroup'] == sg])
+            block(sg, [r for r in scored if r['subgroup'] == sg])
         print('\nSubgroup axis: %s.' % args.subgroup_name)
         print('The pooled ALL block above is a weighted average over subgroups '
               'of unequal size and unequal intrinsic difficulty. Quote the '

@@ -46,6 +46,8 @@ TRAIN_EXTRA=""
 [ "${GLOBAL_RESIDUAL:-1}" = "0" ] && TRAIN_EXTRA="$TRAIN_EXTRA --no_global_residual"
 [ -n "${INIT_FROM:-}" ] && TRAIN_EXTRA="$TRAIN_EXTRA --init_from $INIT_FROM --init_min_coverage $INIT_MIN_COVERAGE"
 [ "${BALANCE_SUBGROUPS:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --balance_subgroups --balance_power $BALANCE_POWER --name_schema $NAME_SCHEMA"
+# Needs --name_schema too, which the line above supplies only when balancing is on.
+[ "${CAP_SUBJECT_SHARE:-0}" != "0" ] && TRAIN_EXTRA="$TRAIN_EXTRA --cap_subject_share $CAP_SUBJECT_SHARE --name_schema $NAME_SCHEMA"
 [ "${RANDOMIZE_DEGRADATION:-0}" = "1" ] && TRAIN_EXTRA="$TRAIN_EXTRA --randomize_degradation --apod_range $APOD_RANGE --snr_range $SNR_RANGE --degradation_modes $DEGRADATION_MODES --degradation_p $DEGRADATION_P --target_spacing $TARGET_SPACING"
 
 # ---- resume automatically if a checkpoint already exists -------------------

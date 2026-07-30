@@ -162,6 +162,22 @@ class SROptions(TrainOptions):
         parser.add_argument('--init_allow_partial', action='store_true',
                             help='Proceed despite low coverage from --init_from')
 
+        # ---- subject share cap ----------------------------------------------
+        parser.add_argument('--cap_subject_share', type=float, default=0.0,
+                            help='Cap the fraction of sampled training patches that '
+                                 'may come from any ONE subject (0 = off). Needed '
+                                 'when a longitudinal cohort is dominated by a few '
+                                 'subjects: measured here, one subject supplied 22 '
+                                 'of 50 volumes and 65%% of the dev training set, '
+                                 'and it was also the only series with anisotropic '
+                                 'through-plane resolution -- so most optimiser '
+                                 'steps went on one infant and one protocol. '
+                                 '--balance_subgroups cannot fix this because that '
+                                 'subject spans both weightings. 0.25 is a '
+                                 'reasonable starting point. Applied after the '
+                                 'weighting balance, which it therefore perturbs; '
+                                 'both achieved shares are printed.')
+
         # ---- subgroup balancing ---------------------------------------------
         parser.add_argument('--balance_subgroups', action='store_true',
                             help='Sample training patches so the t1w/t2w imbalance '

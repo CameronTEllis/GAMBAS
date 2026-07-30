@@ -33,14 +33,27 @@ f99_x/y/z  Per-axis frequency (cyc/voxel) below which 99% of that axis's power
 eff_mm     0.5 / min(f99) scaled by voxel size -- a rough effective resolution
            in mm along the WORST axis. A volume stored at 1 mm with eff_mm near
            2 was, to a good approximation, never a 1 mm image.
-cliff      Power in [0.25, 0.30) divided by power in [0.20, 0.25). A sharp
-           drop (<<1) is the signature of prior resampling or filtering at
-           exactly the 2 mm Nyquist. Around 1 means a natural rolloff.
+cliff      Power in [0.25, 0.30) divided by power in [0.20, 0.25). Read this
+           ONLY as a relative ranking. A real brain has a steeply falling
+           (roughly power-law) spectrum, so cliff well below 1 is the NORMAL
+           rolloff and is not by itself evidence of prior resampling. Only a
+           value far below the rest of the cohort's is suspicious.
 
-Neither f99 nor eff_mm is a calibrated physical measurement -- noise raises the
-apparent high-frequency floor and biases them optimistic, so treat them as a
-ranking over the cohort rather than a specification. hf025 and cliff are the
-robust signals.
+CALIBRATION WARNING
+-------------------
+f99 and eff_mm were validated against synthetic phantoms with near-white
+texture, whose spectra are flat. Real anatomy is not: its power falls steeply
+with frequency, so 99% of the power sits at low frequency even in a genuinely
+1 mm image, and eff_mm therefore reads PESSIMISTIC (too coarse) on real brains.
+Do not conclude from eff_mm ~= 2.5 that a volume is not 1 mm data.
+
+Comparisons that survive this bias, and are the ones to actually use:
+  * volume against volume WITHIN this cohort (same tissue, same rolloff);
+  * axis against axis WITHIN one volume -- the anisotropy check, where the
+    spectral shape cancels out;
+  * --degrade_check, which measures headroom in dB directly by simulating the
+    degradation and scoring the result. That number is self-calibrating and is
+    the one that decides whether the task is worth doing on a given volume.
 
 USAGE
 -----
@@ -62,8 +75,8 @@ try:
 except ImportError:
     sys.exit('SimpleITK is required: pip install SimpleITK')
 
-from sr.naming import DEFAULT_NAME_SCHEMA, strip_ext, subgroup_of, age_of
-from sr.sr_metrics import hf_energy, brain_mask
+from sr.naming import DEFAULT_NAME_SCHEMA, strip_ext, subgroup_of, age_of, subject_of
+from sr.sr_metrics import hf_energy, brain_mask, psnr
 
 
 def load(path):
@@ -104,6 +117,33 @@ def band_power(a, lo, hi):
     grids = np.meshgrid(*[np.fft.fftfreq(n) for n in a.shape], indexing='ij')
     kr = np.sqrt(sum(g ** 2 for g in grids))
     return float(P[(kr >= lo) & (kr < hi)].sum())
+
+
+def headroom_db(path, target_spacing, mode='kspace', snr=0.0):
+    """Measure the available headroom in dB, self-calibrating.
+
+    Simulates the acquisition with the SAME forward model training uses, then
+    scores the sinc-interpolated result against the original inside a foreground
+    mask. This is the honest headroom: it is exactly the baseline the network has
+    to beat, expressed in the units the network is scored in, and it depends on
+    nothing but the volume itself -- no phantom calibration, no assumption about
+    spectral shape.
+
+    High PSNR means the simulated 2 mm input is already nearly the target, so
+    there is little to learn and little to demonstrate on that volume.
+    """
+    from sr.kspace import degrade                     # local: keeps import cheap
+
+    a, spacing = load(path)
+    factors = tuple(float(t) / float(s) for t, s in zip(target_spacing, spacing))
+    lo = degrade(a, factors, mode=mode, snr=snr)
+    rng = max(float(np.ptp(a)), 1e-12)
+    a01 = (a - a.min()) / rng
+    l01 = np.clip((lo - a.min()) / rng, 0, 1)
+    m = brain_mask(a01)
+    if not m.any():
+        return float('nan'), float('nan')
+    return psnr(l01[m], a01[m]), float(m.mean())
 
 
 def audit_one(path, cutoff=0.25, use_mask=True):
@@ -160,6 +200,14 @@ def main(argv=None):
     p.add_argument('--no_mask', action='store_true',
                    help='Do not crop to the head bounding box first')
     p.add_argument('--limit', type=int, default=0, help='Audit only the first N')
+    p.add_argument('--degrade_check', action='store_true',
+                   help='Also simulate the degradation and report the masked sinc '
+                        'PSNR per volume -- the headroom in dB, self-calibrating '
+                        'and directly comparable to the [val] baseline. Slower '
+                        '(one FFT round trip per volume) but this is the number '
+                        'that decides whether a volume can demonstrate anything.')
+    p.add_argument('--target_spacing', type=float, nargs=3, default=[2.0, 2.0, 2.0],
+                   help='Simulated acquisition spacing for --degrade_check')
     a = p.parse_args(argv)
 
     names = sorted(f for f in os.listdir(a.in_dir)
@@ -178,13 +226,21 @@ def main(argv=None):
             print('  !! %s: %s' % (n, e), file=sys.stderr)
             continue
         r['stem'] = stem
+        if a.degrade_check:
+            try:
+                r['sinc_db'], _ = headroom_db(os.path.join(a.in_dir, n),
+                                              a.target_spacing)
+            except Exception as e:                            # noqa: BLE001
+                print('  !! headroom %s: %s' % (n, e), file=sys.stderr)
+                r['sinc_db'] = float('nan')
         try:
             # Keyword args: the second POSITIONAL parameter of both helpers is
             # `regex`, not `schema`.
             r['weighting'] = subgroup_of(stem, schema=a.name_schema) or '?'
             r['age'] = age_of(stem, schema=a.name_schema)
+            r['subject'] = subject_of(stem, schema=a.name_schema)
         except Exception:                                    # noqa: BLE001
-            r['weighting'], r['age'] = '?', float('nan')
+            r['weighting'], r['age'], r['subject'] = '?', float('nan'), '?'
         rows.append(r)
         print('\r  audited %d/%d' % (i + 1, len(names)), end='', file=sys.stderr)
     print('', file=sys.stderr)
@@ -201,24 +257,60 @@ def main(argv=None):
     rows.sort(key=lambda r: r['hf025'])
     print('\ncohort median hf025 = %.5f   flag threshold = %.5f (%.2fx median)\n'
           % (med, thresh, a.flag_below))
-    hdr = ('%-34s %4s %7s %8s %7s %7s %7s %7s %6s %5s'
+    dbcol = '%8s' % 'sinc_dB' if a.degrade_check else ''
+    hdr = ('%-34s %4s %7s %8s %7s %7s %7s %7s %6s%s %5s'
            % ('stem', 'wt', 'hf025', 'rel.med', 'f99_x', 'f99_y', 'f99_z',
-              'eff_mm', 'cliff', 'flag'))
+              'eff_mm', 'cliff', dbcol, 'flag'))
     print(hdr)
     print('-' * len(hdr))
     for r in rows:
-        print('%-34s %4s %7.5f %8.2f %7.3f %7.3f %7.3f %7.2f %6.2f %5s'
+        dbv = ('%8.2f' % r['sinc_db']) if a.degrade_check else ''
+        print('%-34s %4s %7.5f %8.2f %7.3f %7.3f %7.3f %7.2f %6.2f%s %5s'
               % (r['stem'][:34], r['weighting'], r['hf025'], r['hf025'] / med,
                  r['f99_x'], r['f99_y'], r['f99_z'], r['eff_mm'], r['cliff'],
-                 r['flag']))
+                 dbv, r['flag']))
 
     print('\nper-weighting summary')
     for wt in sorted({r['weighting'] for r in rows}):
         sub = [r for r in rows if r['weighting'] == wt]
         v = np.array([r['hf025'] for r in sub])
-        print('  %-5s n=%-3d hf025 median %.5f  range %.5f..%.5f  flagged %d'
+        extra = ''
+        if a.degrade_check:
+            db = np.array([r['sinc_db'] for r in sub], dtype=float)
+            db = db[np.isfinite(db)]
+            if len(db):
+                extra = '  sinc %.1f dB (%.1f..%.1f)' % (np.median(db), db.min(), db.max())
+        print('  %-5s n=%-3d hf025 median %.5f  range %.5f..%.5f  flagged %d%s'
               % (wt, len(sub), np.median(v), v.min(), v.max(),
-                 sum(1 for r in sub if r['flag'])))
+                 sum(1 for r in sub if r['flag']), extra))
+
+    # ---- cohort composition -------------------------------------------------
+    # Printed here because it constrains the split far more tightly than
+    # anything spectral, and it is invisible in a per-volume table. With
+    # --group_by subject a longitudinal subject is one indivisible block: if it
+    # is a large share of the cohort it cannot be balanced across K folds at all.
+    subs = {}
+    for r in rows:
+        subs.setdefault(r.get('subject', '?'), []).append(r)
+    order = sorted(subs.items(), key=lambda kv: -len(kv[1]))
+    print('\ncohort composition: %d volumes / %d subjects' % (len(rows), len(subs)))
+    for name, rs in order[:5]:
+        share = 100.0 * len(rs) / len(rows)
+        wts = ','.join('%s=%d' % (w, sum(1 for x in rs if x['weighting'] == w))
+                       for w in sorted({x['weighting'] for x in rs}))
+        print('  %-16s %2d volumes  %5.1f%%  [%s]' % (name[:16], len(rs), share, wts))
+    if len(order) > 5:
+        print('  ... %d further subjects with 1-2 volumes'
+              % sum(1 for _, rs in order[5:] if len(rs) <= 2))
+    top_share = 100.0 * len(order[0][1]) / len(rows)
+    if top_share > 20:
+        print('\n  !! %s alone is %.0f%% of the cohort. With --group_by subject it is\n'
+              '     one indivisible block, so K-fold CV cannot balance it: one fold\n'
+              '     gets ~%d volumes and the rest ~%d. Every per-fold number will be\n'
+              '     dominated by whether that subject was in train or test, and the\n'
+              '     CV standard error will understate uncertainty badly.'
+              % (order[0][0], top_share, len(order[0][1]),
+                 (len(rows) - len(order[0][1])) // max(1, 4)))
 
     # hf025 is a RADIAL fraction, so a volume that is fine in-plane and coarse
     # through-plane keeps a healthy hf025 and escapes the flag entirely -- the
@@ -251,8 +343,9 @@ def main(argv=None):
 
     if a.csv:
         import csv as _csv
-        keys = ['stem', 'weighting', 'age', 'hf025', 'f99_x', 'f99_y', 'f99_z',
-                'eff_mm', 'worst_axis', 'cliff', 'shape', 'spacing', 'flag']
+        keys = ['stem', 'subject', 'weighting', 'age', 'hf025', 'f99_x', 'f99_y',
+                'f99_z', 'eff_mm', 'worst_axis', 'cliff', 'sinc_db', 'shape',
+                'spacing', 'flag']
         with open(a.csv, 'w', newline='') as fh:
             w = _csv.DictWriter(fh, fieldnames=keys, extrasaction='ignore')
             w.writeheader()
