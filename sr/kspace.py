@@ -9,8 +9,30 @@ input per sample). One implementation so the two cannot drift apart -- if the
 offline and online degradations differ, the model is trained on one operator and
 evaluated against another, which is undetectable from the metrics.
 
-Continuous apodisation
-----------------------
+Vendor apodisation (GE Fermi) -- the physical default
+-----------------------------------------------------
+`mode='fermi'` (the default) reproduces the radial Fermi window GE applies to the
+acquired k-space during reconstruction, translated directly from the vendor's
+`fermi_win.m`:
+
+    dv  = sqrt( sum_i (f_i / k_nyq_i)^2 )     # radius, in units of the coarse Nyquist
+    win = 1 / (1 + exp((dv - p1) / p2))       # Fermi-Dirac roll-off
+
+`p1` is the corner radius (the 0.5 point, in units of the coarse Nyquist) and `p2`
+the transition width; GE typically uses p1/p2 ~ 0.9/0.1 or 0.8/0.2. This matters
+for FIDELITY: a real native 2 mm GE acquisition is Fermi-apodised, so a rectangular
+(brick-wall) truncation would imprint Gibbs ringing a real 2 mm scan does not have,
+and the simulator would then teach the network to de-ring an artefact absent at
+inference. The Fermi suppresses that ringing and, like the scanner, slightly lowers
+the effective resolution near the cutoff. Being radial it also rolls off the
+k-space corners, matching GE's recon.
+
+Do NOT confuse this with the de-ZIP: `dezip_kspace.py` recovers data GE has ALREADY
+Fermi-filtered at the native matrix, so it applies no window. Here we synthesise a
+NEW, coarser acquisition that GE would itself apodise, so the window belongs.
+
+Continuous apodisation (Tukey) -- ablation / alternative
+--------------------------------------------------------
 `apod` is the **Tukey taper fraction** applied across the retained k-space band:
 
     apod = 0.0   rectangular truncation. Sinc PSF, full Gibbs ringing.
@@ -97,6 +119,38 @@ def _tukey_profile(f, k_max, apod):
     return prof
 
 
+def _fermi_radial(shape, keep_fraction, p1, p2):
+    """Radial (elliptical) Fermi window -- a faithful port of GE's fermi_win.m.
+
+    The MATLAB routine computes, over the acquired k-space,
+
+        dv  = |dm| / x                 (or |Re(dm)/Re(x) + i Im(dm)/Im(x)| for 2D)
+        win = 1 / (1 + exp((dv - p1)/p2))
+
+    where `dm` runs -x:x across the matrix, so `x` is the acquired half-matrix and
+    `dv` is the normalised radius (0 at DC, 1 at the matrix edge). The complex form
+    is just a per-axis normalisation, i.e. an elliptical radius. We reproduce that
+    exactly on the FINE grid we are about to crop: for each axis the coarse Nyquist
+    sits at |f_i| = k_nyq_i = 0.5 * keep_fraction[i], so f_i / k_nyq_i plays the role
+    of dm/x and hits +-1 at the acquired matrix edge. The 3D radius extends the 2D
+    ellipse of the .m file to the (3D) anatomical acquisitions.
+
+        p1  corner radius (the 0.5 crossing), in units of the coarse Nyquist
+        p2  transition width; smaller = sharper roll-off
+
+    Being radial, the window also drives the k-space corners (dv up to sqrt(3))
+    to ~0, which is what GE's radial apodisation does.
+    """
+    coords = []
+    for n, frac in zip(shape, keep_fraction):
+        f = _centered_freq(n)
+        k_nyq = 0.5 * frac + 1e-12         # coarse Nyquist on the fine grid
+        coords.append(f / k_nyq)           # -> +-1 at the acquired matrix edge
+    grids = np.meshgrid(*coords, indexing='ij')
+    dv = np.sqrt(sum(g ** 2 for g in grids))
+    return 1.0 / (1.0 + np.exp((dv - float(p1)) / float(p2)))
+
+
 def _gaussian_profile(f, k_max, frac, fwhm_factor=1.0):
     """Gaussian PSF of FWHM = fwhm_factor * target voxel size, band-limited.
 
@@ -108,18 +162,28 @@ def _gaussian_profile(f, k_max, frac, fwhm_factor=1.0):
     return prof * (np.abs(f) <= k_max + 1e-12)
 
 
-def kspace_window(shape, keep_fraction, mode='kspace', slice_axis=2,
-                  slab_fwhm_factor=1.2, apod=None):
-    """Separable multiplicative k-space window, fftshifted (DC at centre).
+def kspace_window(shape, keep_fraction, mode='fermi', slice_axis=2,
+                  slab_fwhm_factor=1.2, apod=None,
+                  fermi_p1=0.9, fermi_p2=0.1):
+    """Multiplicative k-space window, fftshifted (DC at centre).
 
     keep_fraction[i] = source_spacing[i] / target_spacing[i], i.e. the fraction of
     the source band that the coarse acquisition retains along axis i.
 
-    `mode` selects the family; `apod` overrides the taper fraction for the
-    rectangular family. The legacy modes map onto apod as:
-        kspace       -> apod 0.0
-        kspace_hann  -> apod 1.0
+    `mode` selects the family:
+        fermi        -> radial GE Fermi window (the physical default); fermi_p1/p2
+        kspace       -> rectangular, i.e. Tukey apod 0.0
+        kspace_hann  -> Hann, i.e. Tukey apod 1.0
+        gaussian/slab-> Gaussian PSF families (2D / slice-select ablations)
+    `apod` overrides the Tukey taper fraction for the rectangular family.
+
+    The Fermi window is radial, not separable, so it is built and returned whole
+    rather than as a per-axis product.
     """
+    if mode == 'fermi':
+        return _fermi_radial(shape, keep_fraction, fermi_p1, fermi_p2).astype(
+            np.float32)
+
     if apod is None:
         apod = 1.0 if mode == 'kspace_hann' else 0.0
 
@@ -233,10 +297,11 @@ def sigma_for_snr(arr, snr, src_spacing, tgt_spacing, snr_mode='voxel_gain'):
 # Full forward model
 # --------------------------------------------------------------------------- #
 
-def degrade(arr, factors, mode='kspace', apod=None, snr=0.0, rng=None,
+def degrade(arr, factors, mode='fermi', apod=None, snr=0.0, rng=None,
             slice_axis=2, slab_fwhm_factor=1.2, src_spacing=(1.0, 1.0, 1.0),
             tgt_spacing=(2.0, 2.0, 2.0), snr_mode='voxel_gain',
-            magnitude=True, clip_negative=True, return_native=False):
+            magnitude=True, clip_negative=True, return_native=False,
+            fermi_p1=0.9, fermi_p2=0.1):
     """Full 1 mm -> coarse -> 1 mm-grid forward model on a numpy array.
 
     `arr` is (x, y, z) float. Returns the degraded volume on the SAME grid as
@@ -262,13 +327,18 @@ def degrade(arr, factors, mode='kspace', apod=None, snr=0.0, rng=None,
             'pad_before': list(pad_b),
             'lowres_shape': list(tgt),
             'keep_fraction': list(keep_fraction),
-            'mode': mode,
-            'apod': (1.0 if mode == 'kspace_hann' else 0.0) if apod is None
-                    else float(apod)}
+            'mode': mode}
+    if mode == 'fermi':
+        info['apod'] = None                     # keep the key present downstream
+        info['fermi_p1'] = float(fermi_p1)
+        info['fermi_p2'] = float(fermi_p2)
+    else:
+        info['apod'] = ((1.0 if mode == 'kspace_hann' else 0.0)
+                        if apod is None else float(apod))
 
     K = np.fft.fftshift(np.fft.fftn(arr_p))
     K = K * kspace_window(padded_shape, keep_fraction, mode, slice_axis,
-                          slab_fwhm_factor, apod)
+                          slab_fwhm_factor, apod, fermi_p1, fermi_p2)
 
     # Coarse grid. numpy's ifftn normalises by 1/N, and N differs between grids,
     # so rescale to preserve absolute intensity.

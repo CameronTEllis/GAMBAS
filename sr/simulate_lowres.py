@@ -281,6 +281,8 @@ def simulate(img, args, rng):
         snr_mode=args.snr_mode,
         magnitude=args.magnitude,
         clip_negative=args.clip_negative,
+        fermi_p1=args.fermi_p1,
+        fermi_p2=args.fermi_p2,
         return_native=True)
 
     padded_shape = tuple(kinfo['padded_shape'])
@@ -291,6 +293,9 @@ def simulate(img, args, rng):
     qc['lowres_shape'] = kinfo['lowres_shape']
     qc['keep_fraction'] = kinfo['keep_fraction']
     qc['apod'] = kinfo['apod']
+    if 'fermi_p1' in kinfo:                       # record Fermi provenance
+        qc['fermi_p1'] = kinfo['fermi_p1']
+        qc['fermi_p2'] = kinfo['fermi_p2']
     qc['foreground_mean_prenoise'] = kinfo['foreground_mean_prenoise']
     qc['noise_sigma'] = kinfo['noise_sigma']
     qc['snr_mode'] = args.snr_mode
@@ -411,19 +416,29 @@ def build_parser():
 
     p.add_argument('--target_spacing', type=float, nargs=3, default=[2.0, 2.0, 2.0],
                    help='Simulated acquisition voxel size in mm (x y z)')
-    p.add_argument('--mode', type=str, default='kspace',
-                   choices=['kspace', 'kspace_hann', 'slab', 'gaussian'],
-                   help='Forward model. See module docstring.')
+    p.add_argument('--mode', type=str, default='fermi',
+                   choices=['fermi', 'kspace', 'kspace_hann', 'slab', 'gaussian'],
+                   help='Forward model. Default "fermi": the radial GE Fermi window, '
+                        'the physically faithful model for a native GE 2 mm scan. '
+                        '"kspace"/"kspace_hann" are the rectangular/Hann Tukey family '
+                        '(ablation); "slab"/"gaussian" are the 2D/PSF ablations. See '
+                        'module docstring.')
+    p.add_argument('--fermi_p1', type=float, default=0.9,
+                   help='Fermi corner radius (0.5 crossing) in units of the coarse '
+                        'Nyquist, for --mode fermi. GE uses ~0.9 (mild) or ~0.8. '
+                        'Default 0.9.')
+    p.add_argument('--fermi_p2', type=float, default=0.1,
+                   help='Fermi transition width for --mode fermi. GE uses ~0.1 '
+                        '(with p1 0.9) or ~0.2 (with p1 0.8). Default 0.1.')
     p.add_argument('--slice_axis', type=int, default=2, choices=[0, 1, 2],
                    help='Slice-select axis for --mode slab (2 = axial after --reorient)')
     p.add_argument('--slab_fwhm_factor', type=float, default=1.2,
                    help='Slice profile FWHM as a multiple of slice thickness (--mode slab)')
     p.add_argument('--apod', type=float, default=None,
-                   help='Tukey taper fraction across the retained k-space band. '
-                        '0 = rectangular truncation (identical to --mode kspace), '
-                        '1 = Hann over the whole band (identical to --mode '
-                        'kspace_hann). Values between give intermediate vendor-like '
-                        'filtering. Default: derived from --mode.')
+                   help='Tukey taper fraction across the retained k-space band, for '
+                        'the kspace family only. 0 = rectangular (== --mode kspace), '
+                        '1 = Hann (== --mode kspace_hann). Ignored for --mode fermi. '
+                        'Default: derived from --mode.')
 
     p.add_argument('--target_snr', type=float, default=0.0,
                    help='Foreground-mean / noise-sigma at the SOURCE resolution. '
