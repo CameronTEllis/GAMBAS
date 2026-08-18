@@ -26,12 +26,17 @@ run_sbatch() {
   # `--dependency=afterok:<garbage>` and the chain silently never runs.
   if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] $desc" >&2
-    echo "          sbatch $*" >&2
+    echo "          sbatch --export=ALL,SR_CLUSTER_DIR=$HERE $*" >&2
     echo "PENDING"
     return
   fi
   local out
-  out="$(sbatch "$@")"
+  # Pass the real config dir to the job. SLURM copies the batch script to a spool
+  # dir before running it, so the script's own BASH_SOURCE points there, not to
+  # sr/cluster -- which is why sourcing config.sh via BASH_SOURCE fails. Exporting
+  # SR_CLUSTER_DIR (and the scripts preferring it) makes config.sh findable no
+  # matter where this was launched from.
+  out="$(sbatch --export="ALL,SR_CLUSTER_DIR=$HERE" "$@")"
   echo "$desc -> $out" >&2
   echo "$out" | awk '{print $NF}'
 }

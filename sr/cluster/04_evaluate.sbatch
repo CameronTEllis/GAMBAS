@@ -13,7 +13,9 @@
 # ============================================================================
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM runs a COPY of this script from a spool dir; prefer the exported config
+# dir or the sbatch submit dir, falling back to BASH_SOURCE for direct runs.
+HERE="${SR_CLUSTER_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}}"
 if [ -f "$HERE/config.local.sh" ]; then source "$HERE/config.local.sh"; else source "$HERE/config.sh"; fi
 activate_env
 

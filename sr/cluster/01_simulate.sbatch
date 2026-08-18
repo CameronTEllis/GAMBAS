@@ -21,7 +21,11 @@
 # ============================================================================
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM runs a COPY of this script from a spool dir, so BASH_SOURCE does not point
+# at sr/cluster. Prefer SR_CLUSTER_DIR (exported by submit_all.sh) or
+# SLURM_SUBMIT_DIR (the dir you ran sbatch from); fall back to BASH_SOURCE for a
+# direct non-SLURM run.
+HERE="${SR_CLUSTER_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}}"
 if [ -f "$HERE/config.local.sh" ]; then source "$HERE/config.local.sh"; else source "$HERE/config.sh"; fi
 activate_env
 
