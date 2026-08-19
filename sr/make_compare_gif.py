@@ -46,13 +46,23 @@ try:
 except ImportError:
     sys.exit('nibabel is required: pip install nibabel')
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
 except ImportError:
     sys.exit('Pillow is required: pip install Pillow')
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt        # noqa: E402
+
+
+# Per-version border/title colour, so which frame you're on reads in peripheral
+# vision without waiting for the transition. Original is green and appears between
+# the other two, so the sequence flickers green-red-green-yellow -- easy to track.
+BORDER_COLORS = {
+    'lowres':   '#ff3b30',   # red    = degraded 2 mm input
+    'original': '#34c759',   # green  = 1 mm truth
+    'pred':     '#ffcc00',   # yellow = model prediction
+}
 
 
 def load(path):
@@ -95,11 +105,14 @@ def center_of_mass(arr):
     return [int(round(c.mean())) for c in idx]
 
 
-def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px, flip='v'):
+def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px, flip='v',
+                 border_color=None, border_px=0):
     """One montage: sagittal | coronal | axial, titled with `label`. Returns RGB.
 
     `flip` reorients the displayed slices: 'v' flips vertically (the default, so
     superior is up for these volumes), 'h' horizontally, 'vh' both, 'none' as-is.
+    `border_color`/`border_px` draw a solid colour frame around the whole montage
+    (and tint the title) so the current version is legible in peripheral vision.
     """
     # (fixed axis, the two in-plane axes) for each orthogonal view
     views = [(0, 'Sagittal'), (1, 'Coronal'), (2, 'Axial')]
@@ -121,15 +134,20 @@ def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px, flip='v'):
                   extent=[0, sl.shape[0] * sa, 0, sl.shape[1] * sb], aspect='equal')
         ax.set_title(name, color='0.8', fontsize=10)
         ax.axis('off')
-    fig.suptitle(label, color='white', fontsize=15, fontweight='bold', y=0.98)
+    fig.suptitle(label, color=(border_color or 'white'), fontsize=15,
+                 fontweight='bold', y=0.98)
     fig.subplots_adjust(left=0.01, right=0.99, top=0.88, bottom=0.02, wspace=0.03)
 
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
     buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-    rgb = buf[:, :, :3].copy()
+    img = Image.fromarray(buf[:, :, :3].copy())
     plt.close(fig)
-    return Image.fromarray(rgb)
+    # Solid border of exactly `border_px`, same on every frame so the GIF frames
+    # stay identical in size (a GIF requires that).
+    if border_color and border_px > 0:
+        img = ImageOps.expand(img, border=int(border_px), fill=border_color)
+    return img
 
 
 def _pred_subdir(pred_tag):
@@ -138,7 +156,8 @@ def _pred_subdir(pred_tag):
 
 
 def build_gif(lowres, target, pred, out_path, clip=(1.0, 99.0), flip='v',
-              ms=1500, panel_px=500, slices=None, title=None, quiet=False):
+              ms=1500, panel_px=500, slices=None, title=None, border_px=20,
+              quiet=False):
     """Render the low-res -> original -> prediction -> original loop for one volume.
 
     Raises ValueError on a grid mismatch so a batch caller can skip and continue.
@@ -158,14 +177,16 @@ def build_gif(lowres, target, pred, out_path, clip=(1.0, 99.0), flip='v',
     prd = normalize01(prd, clip[0], clip[1])
 
     pre = ('%s\n' % title) if title else ''
+    c = BORDER_COLORS
     sequence = [
-        (low, sp_l, pre + 'LOW-RES (2 mm input)'),
-        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)'),
-        (prd, sp_p, pre + 'PREDICTION (super-res)'),
-        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)'),
+        (low, sp_l, pre + 'LOW-RES (2 mm input)', c['lowres']),
+        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)', c['original']),
+        (prd, sp_p, pre + 'PREDICTION (super-res)', c['pred']),
+        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)', c['original']),
     ]
-    frames = [render_frame(arr, sp, sl, 0.0, 1.0, label, panel_px, flip)
-              for arr, sp, label in sequence]
+    frames = [render_frame(arr, sp, sl, 0.0, 1.0, label, panel_px, flip,
+                           border_color=col, border_px=border_px)
+              for arr, sp, label, col in sequence]
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=ms, loop=0, disposal=2)
     if not quiet:
@@ -321,9 +342,12 @@ def main(argv=None):
     p.add_argument('--flip', choices=['v', 'h', 'vh', 'none'], default='v',
                    help="display flip: 'v' vertical (default), 'h' horizontal, "
                         "'vh' both, 'none' as-is.")
+    p.add_argument('--border_px', type=int, default=20,
+                   help='Colour-coded border thickness in px (red=low-res, '
+                        'green=original, yellow=prediction). 0 disables it.')
     a = p.parse_args(argv)
     render_opts = dict(clip=tuple(a.clip), flip=a.flip, ms=a.ms,
-                       panel_px=a.panel_px, slices=a.slices)
+                       panel_px=a.panel_px, slices=a.slices, border_px=a.border_px)
 
     # Batch: one GIF per participant across all folds.
     if a.all:
