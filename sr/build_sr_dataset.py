@@ -50,6 +50,7 @@ import os
 import random
 import re
 import shutil
+import uuid
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,14 +84,28 @@ def subject_key(stem, pattern):
 
 
 def place(src, dst, mode):
-    if os.path.lexists(dst):
-        os.remove(dst)
+    """Create `dst` as a link/copy of `src`, RACE-SAFE.
+
+    Two experiments (e.g. an L1 and an adversarial run) share the same
+    ${DATASET_DIR}_<mode>/<fold> dataset -- it is keyed to the split, not to
+    EXP_NAME -- so their build jobs can run at the same time and write these same
+    files. The old `if lexists: os.remove; then create` had a TOCTOU window: the
+    other builder could delete the entry between the check and the remove
+    (FileNotFoundError) or recreate it before the symlink (FileExistsError). We
+    instead build under a unique temp name and `os.replace` it into place, which
+    is atomic and overwrites -- so concurrent builders converge instead of
+    tripping over each other.
+    """
+    if mode not in ('link', 'hardlink'):
+        shutil.copy2(src, dst)          # copy: last writer wins, content identical
+        return
+    # Unique temp per call (uuid, not pid) so even threads never share a temp.
+    tmp = '%s.tmp.%s' % (dst, uuid.uuid4().hex)
     if mode == 'link':
-        os.symlink(os.path.abspath(src), dst)
-    elif mode == 'hardlink':
-        os.link(src, dst)
+        os.symlink(os.path.abspath(src), tmp)
     else:
-        shutil.copy2(src, dst)
+        os.link(src, tmp)
+    os.replace(tmp, dst)                # atomic; no check-then-act window
 
 
 def main(argv=None):
