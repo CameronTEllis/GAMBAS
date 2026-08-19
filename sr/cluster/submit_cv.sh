@@ -159,7 +159,7 @@ activate_env; cd '$GAMBAS_ROOT'
 PY -m sr.evaluate_sr --test_path '$DS/test' --checkpoints_dir '$CKPT_DIR' \
   --name '$NAME' --which_epoch '${WHICH_EPOCH:-best}' --out_dir '$EV' \
   --lowres_native_dir '$SIM_DIR/lowres-$METHOD_TAG-native' --patch_size $PATCH_SIZE \
-  --fold '$FOLD' --name_schema '$NAME_SCHEMA' $EVAL_EXTRA \
+  --fold '$FOLD' --name_schema '$NAME_SCHEMA' --pred_tag '${PRED_TAG:-}' $EVAL_EXTRA \
   --save_predictions")
   EVAL_DEPS+=("$JE")
 done

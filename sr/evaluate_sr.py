@@ -132,6 +132,11 @@ def build_parser():
                    help='Also report metrics restricted to a foreground mask')
     p.add_argument('--no_masked', dest='masked', action='store_false')
     p.add_argument('--save_predictions', action='store_true')
+    p.add_argument('--pred_tag', default='',
+                   help='Suffix for the predictions subdir: "" -> predictions/, '
+                        '"adv" -> predictions-adv/. Use it so a second eval (e.g. '
+                        'an adversarial-loss variant) does not overwrite the first '
+                        "run's saved volumes.")
     p.add_argument('--max_volumes', type=int, default=0, help='0 = all')
 
     p.add_argument('--name_schema', default=DEFAULT_NAME_SCHEMA,
@@ -198,9 +203,14 @@ def main(argv=None):
         imgs, labs = imgs[:args.max_volumes], labs[:args.max_volumes]
 
     os.makedirs(args.out_dir, exist_ok=True)
-    pred_dir = os.path.join(args.out_dir, 'predictions')
+    # Predictions go in 'predictions/' by default, or 'predictions-<tag>/' when a
+    # tag is given -- so a second run (e.g. an adversarial variant) does not
+    # overwrite the first run's saved volumes in the same out_dir.
+    pred_subdir = 'predictions' + (('-' + args.pred_tag) if args.pred_tag else '')
+    pred_dir = os.path.join(args.out_dir, pred_subdir)
     if args.save_predictions:
         os.makedirs(pred_dir, exist_ok=True)
+        print('saving predictions to %s' % pred_dir)
 
     # Split-aware: assigned names restart at 0 per split, so the split has
     # to be pinned or '0' resolves to the wrong volume.

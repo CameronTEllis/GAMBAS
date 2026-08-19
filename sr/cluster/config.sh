@@ -82,6 +82,13 @@ export LAMBDA_L1="${LAMBDA_L1:-100.0}"       # --lambda_A
 # against the target's.
 export LAMBDA_ADV="${LAMBDA_ADV:-0.0}"
 
+# Suffix for the saved-predictions subdir at eval time: "" -> predictions/,
+# "adv" -> predictions-adv/. Set it (e.g. PRED_TAG=adv) when evaluating a variant
+# so its volumes do not overwrite a previous run's in the same eval dir. NOTE: the
+# cleaner separation for a whole variant is a distinct EXP_NAME (below), which
+# splits checkpoints AND eval outputs; PRED_TAG only splits the prediction volumes.
+export PRED_TAG="${PRED_TAG:-}"
+
 # ---- architecture: global residual -----------------------------------------
 # Predict y = x + s*G(x) rather than y = G(x), with s a learnable scalar that
 # starts at 0.

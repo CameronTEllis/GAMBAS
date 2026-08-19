@@ -96,16 +96,23 @@ if [ "${TOOLCHAIN_OK}" = "1" ]; then
   export CUDAHOSTCXX="${CUDAHOSTCXX:-$CXX}"
 fi
 
-# Restrict the architectures compiled for. The upstream default builds
-# sm_75/80/87/90, which (a) omits sm_70 (V100) entirely and (b) takes ~4x longer
-# than needed. Query the actual GPU when one is visible.
-if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
-  DETECTED_ARCH="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
-                   | sort -u | paste -sd';' -)"
-  if [ -n "$DETECTED_ARCH" ]; then
-    export TORCH_CUDA_ARCH_LIST="$DETECTED_ARCH"
-    echo "arch list: $TORCH_CUDA_ARCH_LIST (detected)"
-  fi
+# Compile mamba_ssm / causal_conv1d for EVERY GPU architecture the jobs might land
+# on -- NOT just the build node's. Sherlock's gpu partition is heterogeneous
+# (V100 7.0, T4 7.5, A100 8.0, A40/L40/A6000 8.6, H100 9.0), and a kernel built for
+# one arch fails on any other with
+#     RuntimeError: CUDA error: no kernel image is available for execution
+# which is exactly what a K-fold sweep hits when different folds land on different
+# GPUs. Auto-detecting the build node's single arch (the old behaviour) caused this.
+# A multi-arch build is a few minutes slower to compile but runs anywhere.
+#
+# Override TORCH_CUDA_ARCH_LIST (and pin GPU_TYPE / a SLURM --constraint) only if
+# you deliberately want a faster single-arch build tied to one GPU model. Add 6.0
+# if you must run on P100 nodes.
+if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
+  export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;9.0"
+  echo "arch list: $TORCH_CUDA_ARCH_LIST (multi-arch default; V100 .. H100)"
+else
+  echo "arch list: $TORCH_CUDA_ARCH_LIST (from environment)"
 fi
 
 # shellcheck disable=SC1090
