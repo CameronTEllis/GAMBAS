@@ -177,12 +177,13 @@ export GPU_TYPE="${GPU_TYPE:-}"                    # e.g. a100 -> gres=gpu:a100:
 
 # SLURM --constraint to restrict which GPUs jobs land on. On Sherlock the gpu
 # partition is a grab-bag (P100/TITAN Xp CC 6.x, V100 7.0, 2080Ti 7.5, 3090 8.6,
-# L40S 8.9, H100 9.0). mamba_ssm's kernels only cover the architectures it was
-# compiled for -- landing on an uncovered one dies with "no kernel image is
-# available". CC 7.0 (V100) and 9.0 (H100) are the datacenter cards that are both
-# covered AND have real memory, so default to those. Widen only if you have
-# verified the mamba build covers the extra arch. Empty = no constraint.
-export GPU_CONSTRAINT="${GPU_CONSTRAINT:-GPU_CC:7.0|GPU_CC:9.0}"
+# L40S 8.9, H100 9.0). mamba_ssm's kernels fail on architectures they don't cover
+# ("no kernel image is available"). Verified empirically: the build runs on
+# CC >= 7.0 (confirmed on V100 7.0, 2080Ti 7.5, and L40S 8.9) and only DIES on the
+# Pascal cards (6.0/6.1). So exclude just those two -- everything Volta and newer
+# is fair game. SLURM constraints can't express ">=", so we OR the CCs present.
+# Empty = no constraint.
+export GPU_CONSTRAINT="${GPU_CONSTRAINT:-GPU_CC:7.0|GPU_CC:7.5|GPU_CC:8.6|GPU_CC:8.9|GPU_CC:9.0}"
 
 export PREP_TIME="${PREP_TIME:-02:00:00}"
 export PREP_MEM="${PREP_MEM:-16G}"
