@@ -63,6 +63,22 @@ def window(arr, lo=1.0, hi=99.0):
     return float(np.percentile(fg, lo)), float(np.percentile(fg, hi))
 
 
+def normalize01(arr, lo=1.0, hi=99.0):
+    """Map arr to [0, 1] by its OWN foreground percentiles.
+
+    Each volume is normalised independently because they are saved on different
+    numeric scales -- the target/input keep the raw MRI intensities (hundreds to
+    thousands) while the prediction is written as p01*255 (0..255). A single shared
+    window would then make the prediction render near-black. Per-volume percentile
+    normalisation puts all three on the same display range so only the sharpness
+    flickers, not the brightness.
+    """
+    lo_v, hi_v = window(arr, lo, hi)
+    if hi_v <= lo_v:
+        hi_v = lo_v + 1e-6
+    return np.clip((arr - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+
+
 def center_of_mass(arr):
     """Foreground centre of mass, for informative (not edge) slice positions."""
     m = arr > (arr.max() * 0.1)
@@ -185,8 +201,15 @@ def main(argv=None):
 
     slices = a.slices if a.slices else center_of_mass(tgt)
     slices = [int(np.clip(s, 0, n - 1)) for s, n in zip(slices, tgt.shape)]
-    vmin, vmax = window(tgt, a.clip[0], a.clip[1])            # ONE shared window
-    print('slices (x,y,z) = %s   window = [%.3g, %.3g]' % (slices, vmin, vmax))
+
+    # Normalise each volume by its own foreground percentiles -> [0, 1], so the
+    # different on-disk scales (raw MRI vs 0..255 prediction) don't matter.
+    low = normalize01(low, a.clip[0], a.clip[1])
+    tgt = normalize01(tgt, a.clip[0], a.clip[1])
+    prd = normalize01(prd, a.clip[0], a.clip[1])
+    vmin, vmax = 0.0, 1.0
+    print('slices (x,y,z) = %s   (each volume normalised to [0,1] by its own '
+          'foreground p%.0f-p%.0f)' % (slices, a.clip[0], a.clip[1]))
 
     # low-res -> original -> prediction -> original -> (loop)
     sequence = [
