@@ -92,6 +92,7 @@ PY -m sr.train_sr \
   --batch_size "$BATCH_SIZE" \
   --lambda_A "$LAMBDA_L1" \
   --lambda_adv "$LAMBDA_ADV" \
+  --l1_edge_weight "${L1_EDGE_WEIGHT:-0.0}" \
   --niter "$NITER" --niter_decay "$NITER_DECAY" \
   --lr "$LR" \
   --workers "$WORKERS" \

@@ -145,6 +145,7 @@ PY -m sr.train_sr --data_path '$DS/train' --val_path '$DS/val' \
   --checkpoints_dir '$CKPT_DIR' --name '$NAME' \
   --model gambas --netG gambas --patch_size $PATCH_SIZE \
   --batch_size $BATCH_SIZE --lambda_A $LAMBDA_L1 --lambda_adv $LAMBDA_ADV \
+  --l1_edge_weight ${L1_EDGE_WEIGHT:-0.0} \
   --niter $NITER --niter_decay $NITER_DECAY --lr $LR --workers $WORKERS \
   --iters_per_epoch $ITERS_PER_EPOCH --val_freq 5 --val_metric psnr \
   --sr_augment --tensorboard $TRAIN_EXTRA \$RESUME &

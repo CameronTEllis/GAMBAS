@@ -82,6 +82,13 @@ export LAMBDA_L1="${LAMBDA_L1:-100.0}"       # --lambda_A
 # against the target's.
 export LAMBDA_ADV="${LAMBDA_ADV:-0.0}"
 
+# Edge-weighted L1 (cheap boundary-aware experiment). Weights the per-voxel L1 by
+# the target's gradient magnitude so tissue boundaries (incl. GM/WM) get more of
+# the loss budget, renormalised to mean weight 1 (total loss + lambda_A unchanged).
+# 0 = plain L1 (default, identical to the baseline). ~1-4 emphasises edges. Run it
+# under a DISTINCT EXP_NAME so it doesn't overwrite the L1/adv results.
+export L1_EDGE_WEIGHT="${L1_EDGE_WEIGHT:-0.0}"
+
 # Suffix for the saved-predictions subdir at eval time: "" -> predictions/,
 # "adv" -> predictions-adv/. Set it (e.g. PRED_TAG=adv) when evaluating a variant
 # so its volumes do not overwrite a previous run's in the same eval dir. NOTE: the

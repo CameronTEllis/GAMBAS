@@ -50,6 +50,15 @@ class GambasModel(BaseModel):
             parser.add_argument('--lambda_f', type=float, default=0.9, help='momentum term for f')
             parser.add_argument('--lambda_A', type=float, default=100.0, help='lambda for sobel l1 loss')
             parser.add_argument('--lambda_adv', type=float, default=1.0, help='weight for adversarial loss')
+            parser.add_argument('--l1_edge_weight', type=float, default=0.0,
+                                help='Edge-weighted L1: weight the per-voxel L1 by '
+                                     'the TARGET gradient magnitude so edges (incl. '
+                                     'the GM/WM boundary) get more loss. The loss is '
+                                     'renormalised to mean weight 1, so total loss '
+                                     'scale and lambda_A are unchanged -- it only '
+                                     'REDISTRIBUTES effort onto edges. 0 = plain L1 '
+                                     '(default, identical to before); ~1-4 emphasises '
+                                     'edges. Cheap first test of a boundary-aware loss.')
             parser.add_argument('--imageSize', type=int, default=256, help='size of largest axis from input 3D volume (if all equal, then this is the size of all axes)')
             # parser.add_argument('--lambda_perc', type=float, default=1.0, help='weight for perceptual loss')
 
@@ -157,6 +166,33 @@ class GambasModel(BaseModel):
         self.loss_D = (self.loss_D_fake + self.loss_D_real) * 0.5
         self.loss_D.backward()
 
+    @staticmethod
+    def _edge_weighted_l1(fake, real, alpha):
+        """mean( w * |fake - real| ) with w = 1 + alpha * edge(real), mean(w)=1.
+
+        `edge(real)` is the target's gradient magnitude (forward differences along
+        D,H,W), normalised per sample by 4x its mean so that voxels whose gradient
+        exceeds ~4x the average -- i.e. tissue boundaries -- approach full weight
+        while flat regions stay near zero. Computed under no_grad: it is a weight on
+        the target, not a differentiable term. Renormalising to mean weight 1 keeps
+        the total loss magnitude (and thus lambda_A) identical to plain L1, so the
+        only change versus the baseline is WHERE the L1 effort is spent.
+        """
+        with torch.no_grad():
+            dz = torch.zeros_like(real)
+            dy = torch.zeros_like(real)
+            dx = torch.zeros_like(real)
+            dz[:, :, 1:, :, :] = real[:, :, 1:, :, :] - real[:, :, :-1, :, :]
+            dy[:, :, :, 1:, :] = real[:, :, :, 1:, :] - real[:, :, :, :-1, :]
+            dx[:, :, :, :, 1:] = real[:, :, :, :, 1:] - real[:, :, :, :, :-1]
+            g = torch.sqrt(dz * dz + dy * dy + dx * dx + 1e-12)
+            b = g.shape[0]
+            gmean = g.view(b, -1).mean(dim=1).clamp_min(1e-8).view(b, 1, 1, 1, 1)
+            edge = (g / (4.0 * gmean)).clamp(0.0, 1.0)
+            w = 1.0 + float(alpha) * edge
+            w = w / w.mean()
+        return (w * (fake - real).abs()).mean()
+
     def backward_G(self):
         # First, G(A) should fake the discriminator.
         # --lambda_adv was declared in modify_commandline_options but never
@@ -174,7 +210,18 @@ class GambasModel(BaseModel):
             pred_fake = self.netD(fake_AB)
             self.loss_G_GAN = self.criterionGAN(pred_fake, True) * lambda_adv
         # Second, G(A) = B
-        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
+        edge_w = getattr(self.opt, 'l1_edge_weight', 0.0)
+        if edge_w and edge_w > 0:
+            # Edge-weighted L1: put more of the (fixed) L1 budget on high-gradient
+            # regions of the TARGET -- i.e. tissue boundaries such as GM/WM -- which
+            # is where the recoverable high-frequency structure lives and where a
+            # plain, spatially-uniform L1 under-invests. Weights are renormalised to
+            # mean 1, so this only REDISTRIBUTES effort; total loss scale and
+            # lambda_A are unchanged, keeping it comparable to the plain-L1 run.
+            self.loss_G_L1 = self._edge_weighted_l1(
+                self.fake_B, self.real_B, edge_w) * self.opt.lambda_A
+        else:
+            self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
         # Third, perceptual loss: (G(A)) = (B)
         # self.loss_G_perc = self.criterionPerc(self.fake_B, self.real_B) * self.opt.lambda_perc
 
