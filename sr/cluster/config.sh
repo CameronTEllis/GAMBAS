@@ -42,7 +42,7 @@ export LOG_DIR="${LOG_DIR:-$SCRATCH/slurm_logs}"
 
 # ---- simulation parameters -------------------------------------------------
 export TARGET_SPACING="${TARGET_SPACING:-2.0 2.0 2.0}"
-export SIM_MODE="${SIM_MODE:-kspace}"        # kspace|kspace_hann|slab|gaussian
+export SIM_MODE="${SIM_MODE:-fermi}"        # kspace|kspace_hann|slab|gaussian
 export TARGET_SNR="${TARGET_SNR:-30}"        # 0 to disable noise
 export UPSAMPLE="${UPSAMPLE:-sinc}"
 # Directory tag for this simulation config; defaults to the mode. Override to
