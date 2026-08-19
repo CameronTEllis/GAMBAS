@@ -83,10 +83,11 @@ if contains train "${STAGES[@]}"; then
   GRES="gpu:1"
   [ -n "$GPU_TYPE" ] && GRES="gpu:${GPU_TYPE}:1"
   # shellcheck disable=SC2086
+  CONSTRAINT_OPT=""; [ -n "${GPU_CONSTRAINT:-}" ] && CONSTRAINT_OPT="--constraint=${GPU_CONSTRAINT}"
   JID_TRAIN=$(run_sbatch "train" $COMMON $DEP \
       --job-name="$EXP_NAME" \
       --partition="$GPU_PARTITION" \
-      --gres="$GRES" \
+      --gres="$GRES" $CONSTRAINT_OPT \
       --cpus-per-task="$TRAIN_CPUS" \
       --mem="$TRAIN_MEM" \
       --time="$TRAIN_TIME" \
@@ -102,10 +103,11 @@ if contains eval "${STAGES[@]}"; then
   GRES="gpu:1"
   [ -n "$GPU_TYPE" ] && GRES="gpu:${GPU_TYPE}:1"
   # shellcheck disable=SC2086
+  CONSTRAINT_OPT=""; [ -n "${GPU_CONSTRAINT:-}" ] && CONSTRAINT_OPT="--constraint=${GPU_CONSTRAINT}"
   JID_EVAL=$(run_sbatch "evaluate" $COMMON $DEP \
       --job-name=sr_eval \
       --partition="$GPU_PARTITION" \
-      --gres="$GRES" \
+      --gres="$GRES" $CONSTRAINT_OPT \
       --cpus-per-task=4 \
       --mem="$EVAL_MEM" \
       --time="$EVAL_TIME" \

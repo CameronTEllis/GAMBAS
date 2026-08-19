@@ -34,6 +34,9 @@ COMMON="$(sbatch_common)"
 mkdir -p "$LOG_DIR"
 
 GRES="gpu:1"; [ -n "$GPU_TYPE" ] && GRES="gpu:${GPU_TYPE}:1"
+# Restrict GPU architectures (see GPU_CONSTRAINT in config.sh). Only the GPU jobs
+# (train/eval) take it; build/aggregate are CPU-only.
+CONSTRAINT_OPT=""; [ -n "${GPU_CONSTRAINT:-}" ] && CONSTRAINT_OPT="--constraint=${GPU_CONSTRAINT}"
 
 # Regex overrides are optional: an empty value means "derive from NAME_SCHEMA",
 # and passing --subject_regex '' would be parsed as a literal empty pattern.
@@ -126,7 +129,7 @@ PY -m sr.check_dataset --root '$DS' --n 0 --patch_size $PATCH_SIZE")
   # ---- train --------------------------------------------------------------
   # shellcheck disable=SC2086
   JT=$(run_sbatch "train $TAG" $COMMON --dependency=afterok:$JB \
-      --job-name="$NAME" --partition="$GPU_PARTITION" --gres="$GRES" \
+      --job-name="$NAME" --partition="$GPU_PARTITION" --gres="$GRES" $CONSTRAINT_OPT \
       --cpus-per-task="$TRAIN_CPUS" --mem="$TRAIN_MEM" --time="$TRAIN_TIME" \
       --requeue --signal=B:USR1@180 \
       --output="$LOG_DIR/${NAME}_%j.out" --error="$LOG_DIR/${NAME}_%j.err" \
@@ -150,7 +153,7 @@ wait")
   # ---- evaluate -----------------------------------------------------------
   # shellcheck disable=SC2086
   JE=$(run_sbatch "eval $TAG" $COMMON --dependency=afterok:$JT \
-      --job-name="sre_$TAG" --partition="$GPU_PARTITION" --gres="$GRES" \
+      --job-name="sre_$TAG" --partition="$GPU_PARTITION" --gres="$GRES" $CONSTRAINT_OPT \
       --cpus-per-task=4 --mem="$EVAL_MEM" --time="$EVAL_TIME" \
       --output="$LOG_DIR/sre_${TAG}_%j.out" --error="$LOG_DIR/sre_${TAG}_%j.err" \
       --wrap="set -euo pipefail

@@ -185,7 +185,15 @@ else
   #    references, so a source build dies with
   #      ninja: error: '.../csrc/selective_scan/selective_scan.cpp' ... missing
   #    no matter how good your toolchain is. The git tag contains csrc/.
-  export MAX_JOBS="${MAX_JOBS:-4}"
+  #
+  # MAX_JOBS default is 2, deliberately low: each mamba CUDA translation unit
+  # (selective_scan_*.cu, compiled for every arch) can peak at several GB in cicc,
+  # so 4 parallel compiles OOM-kill the node -- the failure looks like
+  #    c++: fatal error: Killed signal terminated program cc1plus
+  #    sh: line 1: NNNNN Killed  cicc ...
+  # which is the OOM killer, not a compile error. Raise it only on a fat-memory
+  # node (e.g. MAX_JOBS=4 with --mem>=64G); lower to 1 if you still get killed.
+  export MAX_JOBS="${MAX_JOBS:-2}"
   CC1D_SPEC="${CC1D_SPEC:-causal-conv1d>=1.4.0}"
   MAMBA_VER="${MAMBA_VER:-2.2.2}"
   MAMBA_SPEC="${MAMBA_SPEC:-git+https://github.com/state-spaces/mamba.git@v${MAMBA_VER}}"
