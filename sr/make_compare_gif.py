@@ -15,20 +15,27 @@ target's foreground) so the brightness does not flicker -- only the detail does.
 Display uses nearest-neighbour interpolation on purpose: bilinear would blur all
 three equally and hide the very sharpness difference you are trying to judge.
 
-USAGE
+USAGE  (`source sr/cluster/config.sh` first so $DATASET_DIR/$EVAL_DIR are set)
 -----
-    # Easy mode -- just the held-out index (from per_volume.csv). Paths are built
-    # from $DATASET_DIR / $EVAL_DIR, so `source sr/cluster/config.sh` first:
-    python -m sr.make_compare_gif 3
-    python -m sr.make_compare_gif 3 --fold fold0 --mode cv     # a CV fold
+    # Batch -- one GIF per participant, across every fold, named by participant:
+    python -m sr.make_compare_gif --all --mode cv
+    python -m sr.make_compare_gif --all --mode cv --pred_tag adv_latest   # adversarial
+    #   -> ${EVAL_DIR}_cv/gifs/<participant>.gif           (L1)
+    #      ${EVAL_DIR}_cv/gifs-adv_latest/<participant>_adv_latest.gif  (adv, no clash)
 
-    # Explicit mode -- give the three files yourself:
+    # Single held-out volume by index (from per_volume.csv):
+    python -m sr.make_compare_gif 3 --mode cv --fold fold0
+    python -m sr.make_compare_gif 3 --mode cv --fold fold0 --pred_tag adv_latest
+
+    # Explicit -- give the three files yourself:
     python -m sr.make_compare_gif --lowres INPUT.nii.gz --target TRUTH.nii.gz \
                                   --pred PRED.nii.gz --out compare.gif
 
-    # options: --ms 600 (per-frame), --panel_px 500, --slices X Y Z (override)
+    # options: --ms 1500 (per-frame), --panel_px 500, --slices X Y Z, --flip
 """
 import argparse
+import csv
+import glob
 import os
 import sys
 
@@ -125,13 +132,53 @@ def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px, flip='v'):
     return Image.fromarray(rgb)
 
 
-def resolve_by_index(index, mode, fold, test_dir, pred_dir):
+def _pred_subdir(pred_tag):
+    """predictions/ or predictions-<tag>/ -- must match evaluate_sr --pred_tag."""
+    return 'predictions' + (('-' + pred_tag) if pred_tag else '')
+
+
+def build_gif(lowres, target, pred, out_path, clip=(1.0, 99.0), flip='v',
+              ms=1500, panel_px=500, slices=None, title=None, quiet=False):
+    """Render the low-res -> original -> prediction -> original loop for one volume.
+
+    Raises ValueError on a grid mismatch so a batch caller can skip and continue.
+    """
+    low, sp_l = load(lowres)
+    tgt, sp_t = load(target)
+    prd, sp_p = load(pred)
+    if not (low.shape == tgt.shape == prd.shape):
+        raise ValueError('shapes differ: lowres %s, target %s, pred %s -- all three '
+                         'must be on the same grid.' % (low.shape, tgt.shape, prd.shape))
+
+    sl = slices if slices else center_of_mass(tgt)
+    sl = [int(np.clip(s, 0, n - 1)) for s, n in zip(sl, tgt.shape)]
+    # Per-volume normalisation so the different on-disk scales don't matter.
+    low = normalize01(low, clip[0], clip[1])
+    tgt = normalize01(tgt, clip[0], clip[1])
+    prd = normalize01(prd, clip[0], clip[1])
+
+    pre = ('%s\n' % title) if title else ''
+    sequence = [
+        (low, sp_l, pre + 'LOW-RES (2 mm input)'),
+        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)'),
+        (prd, sp_p, pre + 'PREDICTION (super-res)'),
+        (tgt, sp_t, pre + 'ORIGINAL (1 mm truth)'),
+    ]
+    frames = [render_frame(arr, sp, sl, 0.0, 1.0, label, panel_px, flip)
+              for arr, sp, label in sequence]
+    frames[0].save(out_path, save_all=True, append_images=frames[1:],
+                   duration=ms, loop=0, disposal=2)
+    if not quiet:
+        print('  wrote %s' % out_path)
+
+
+def resolve_by_index(index, mode, fold, test_dir, pred_dir, pred_tag):
     """Build (lowres, target, pred, out) paths for held-out volume `index`.
 
     Base dirs default to the standard cluster layout, derived from $DATASET_DIR
     and $EVAL_DIR (as set by config.sh):
         test_dir = ${DATASET_DIR}_<mode>/<fold>/test   (has images/ and labels/)
-        pred_dir = ${EVAL_DIR}_<mode>/<fold>/predictions
+        pred_dir = ${EVAL_DIR}_<mode>/<fold>/predictions[-<pred_tag>]
     Override either with --test_dir/--pred_dir if your paths differ.
     """
     if test_dir is None:
@@ -145,7 +192,7 @@ def resolve_by_index(index, mode, fold, test_dir, pred_dir):
         if not ed:
             sys.exit('index mode needs $EVAL_DIR (run `source sr/cluster/config.sh` '
                      'first) or an explicit --pred_dir.')
-        pred_dir = os.path.join('%s_%s' % (ed, mode), fold, 'predictions')
+        pred_dir = os.path.join('%s_%s' % (ed, mode), fold, _pred_subdir(pred_tag))
 
     lowres = os.path.join(test_dir, 'images', '%d.nii.gz' % index)
     target = os.path.join(test_dir, 'labels', '%d.nii.gz' % index)
@@ -153,9 +200,78 @@ def resolve_by_index(index, mode, fold, test_dir, pred_dir):
     for tag, pth in (('input', lowres), ('target', target), ('prediction', pred)):
         if not os.path.exists(pth):
             sys.exit('index %d: %s not found at %s\n(check the index against '
-                     'per_volume.csv, and --mode/--fold/--test_dir/--pred_dir).'
-                     % (index, tag, pth))
-    return lowres, target, pred, 'compare_%s_%s_%d.gif' % (mode, fold, index)
+                     'per_volume.csv, and --mode/--fold/--pred_tag/--test_dir/'
+                     '--pred_dir).' % (index, tag, pth))
+    suffix = ('_' + pred_tag) if pred_tag else ''
+    return lowres, target, pred, 'compare_%s_%s_%d%s.gif' % (mode, fold, index, suffix)
+
+
+def run_batch(mode, pred_tag, out_dir, ds_root, eval_root, opts):
+    """One GIF per held-out participant, across ALL folds, named by participant.
+
+    Walks every ${EVAL_DIR}_<mode>/fold*/ directory, reads its per_volume.csv to
+    map the on-disk index (0,1,...) back to the participant stem, finds the
+    matching input/target/prediction, and writes <stem>[_<pred_tag>].gif. The
+    pred_tag both selects predictions-<tag>/ AND is appended to every output name,
+    so an adversarial run cannot overwrite the L1 GIFs.
+    """
+    if eval_root is None:
+        ed = os.environ.get('EVAL_DIR')
+        if not ed:
+            sys.exit('--all needs $EVAL_DIR (source sr/cluster/config.sh) or '
+                     '--eval_root.')
+        eval_root = '%s_%s' % (ed, mode)
+    if ds_root is None:
+        dd = os.environ.get('DATASET_DIR')
+        if not dd:
+            sys.exit('--all needs $DATASET_DIR (source sr/cluster/config.sh) or '
+                     '--ds_root.')
+        ds_root = '%s_%s' % (dd, mode)
+
+    fold_dirs = sorted(d for d in glob.glob(os.path.join(eval_root, 'fold*'))
+                       if os.path.isdir(d))
+    if not fold_dirs:
+        sys.exit('no fold*/ directories under %s (check --mode and $EVAL_DIR).'
+                 % eval_root)
+
+    if out_dir is None:
+        out_dir = os.path.join(eval_root, 'gifs' + (('-' + pred_tag) if pred_tag else ''))
+    os.makedirs(out_dir, exist_ok=True)
+    suffix = ('_' + pred_tag) if pred_tag else ''
+    pred_sub = _pred_subdir(pred_tag)
+
+    n_ok = n_skip = 0
+    for fold_dir in fold_dirs:
+        fold = os.path.basename(fold_dir)
+        pv = os.path.join(fold_dir, 'per_volume.csv')
+        if not os.path.exists(pv):
+            print('  [skip fold] no per_volume.csv in %s' % fold_dir)
+            continue
+        test = os.path.join(ds_root, fold, 'test')
+        pred_dir = os.path.join(fold_dir, pred_sub)
+        with open(pv) as fh:
+            rows = list(csv.DictReader(fh))
+        print('%s: %d volumes  (predictions: %s)' % (fold, len(rows), pred_dir))
+        for r in rows:
+            idx = r.get('volume')
+            stem = r.get('stem') or idx
+            lowres = os.path.join(test, 'images', '%s.nii.gz' % idx)
+            target = os.path.join(test, 'labels', '%s.nii.gz' % idx)
+            pred = os.path.join(pred_dir, '%s_pred.nii.gz' % idx)
+            missing = [p for p in (lowres, target, pred) if not os.path.exists(p)]
+            if missing:
+                print('  [skip] %s (idx %s): missing %s'
+                      % (stem, idx, os.path.basename(missing[0])))
+                n_skip += 1
+                continue
+            out = os.path.join(out_dir, '%s%s.gif' % (stem, suffix))
+            try:
+                build_gif(lowres, target, pred, out, title=stem, **opts)
+                n_ok += 1
+            except Exception as e:                               # noqa: BLE001
+                print('  [fail] %s: %s' % (stem, e))
+                n_skip += 1
+    print('\ndone: %d gif(s) written to %s, %d skipped.' % (n_ok, out_dir, n_skip))
 
 
 def main(argv=None):
@@ -165,11 +281,26 @@ def main(argv=None):
                    help='Held-out volume index (from per_volume.csv). If given, the '
                         'three files are located automatically; --lowres/--target/'
                         '--pred are then optional.')
+    p.add_argument('--all', action='store_true',
+                   help='Batch: one GIF per held-out participant across ALL folds '
+                        'of --mode, named by participant. Uses $DATASET_DIR/$EVAL_DIR.')
     p.add_argument('--mode', default='dev',
-                   help='Split mode for index paths: dev or cv (default dev).')
+                   help='Split mode: dev or cv (default dev). With --all, walks '
+                        'every ${EVAL_DIR}_<mode>/fold*/.')
     p.add_argument('--fold', default='folddev',
-                   help='Fold tag for index paths: folddev, fold0, ... (default '
-                        'folddev).')
+                   help='Fold tag for single-index mode: folddev, fold0, ... '
+                        '(default folddev). Ignored by --all.')
+    p.add_argument('--pred_tag', default='',
+                   help='Predictions subdir suffix, matching evaluate_sr --pred_tag: '
+                        '"" -> predictions/, "adv_latest" -> predictions-adv_latest/. '
+                        'Also appended to every output GIF name so an adversarial '
+                        'run never overwrites the L1 GIFs.')
+    p.add_argument('--out_dir', default=None,
+                   help='Batch output dir (default ${EVAL_DIR}_<mode>/gifs[-<tag>]).')
+    p.add_argument('--ds_root', default=None,
+                   help='Override the ${DATASET_DIR}_<mode> root (--all).')
+    p.add_argument('--eval_root', default=None,
+                   help='Override the ${EVAL_DIR}_<mode> root (--all).')
     p.add_argument('--test_dir', default=None,
                    help='Override the dir holding images/ and labels/ (index mode).')
     p.add_argument('--pred_dir', default=None,
@@ -191,51 +322,30 @@ def main(argv=None):
                    help="display flip: 'v' vertical (default), 'h' horizontal, "
                         "'vh' both, 'none' as-is.")
     a = p.parse_args(argv)
+    render_opts = dict(clip=tuple(a.clip), flip=a.flip, ms=a.ms,
+                       panel_px=a.panel_px, slices=a.slices)
 
-    # Index mode: derive the three paths (and a default output name).
+    # Batch: one GIF per participant across all folds.
+    if a.all:
+        run_batch(a.mode, a.pred_tag, a.out_dir, a.ds_root, a.eval_root, render_opts)
+        return
+
+    # Single volume: by index (auto-located) or by explicit paths.
+    out = a.out
     if a.index is not None:
         a.lowres, a.target, a.pred, derived_out = resolve_by_index(
-            a.index, a.mode, a.fold, a.test_dir, a.pred_dir)
-        if a.out is None:
-            a.out = derived_out
+            a.index, a.mode, a.fold, a.test_dir, a.pred_dir, a.pred_tag)
+        out = out or derived_out
     elif not (a.lowres and a.target and a.pred):
-        p.error('give an index (e.g. `make_compare_gif 3`) OR all of '
+        p.error('give an index (e.g. `make_compare_gif 3`), --all, OR all of '
                 '--lowres/--target/--pred.')
-    if a.out is None:
-        a.out = 'compare.gif'
+    out = out or 'compare.gif'
 
-    low, sp_l = load(a.lowres)
-    tgt, sp_t = load(a.target)
-    prd, sp_p = load(a.pred)
-    if not (low.shape == tgt.shape == prd.shape):
-        sys.exit('shapes differ: lowres %s, target %s, pred %s -- all three must be '
-                 'on the same grid.' % (low.shape, tgt.shape, prd.shape))
-
-    slices = a.slices if a.slices else center_of_mass(tgt)
-    slices = [int(np.clip(s, 0, n - 1)) for s, n in zip(slices, tgt.shape)]
-
-    # Normalise each volume by its own foreground percentiles -> [0, 1], so the
-    # different on-disk scales (raw MRI vs 0..255 prediction) don't matter.
-    low = normalize01(low, a.clip[0], a.clip[1])
-    tgt = normalize01(tgt, a.clip[0], a.clip[1])
-    prd = normalize01(prd, a.clip[0], a.clip[1])
-    vmin, vmax = 0.0, 1.0
-    print('slices (x,y,z) = %s   (each volume normalised to [0,1] by its own '
-          'foreground p%.0f-p%.0f)' % (slices, a.clip[0], a.clip[1]))
-
-    # low-res -> original -> prediction -> original -> (loop)
-    sequence = [
-        (low, sp_l, 'LOW-RES (2 mm input)'),
-        (tgt, sp_t, 'ORIGINAL (1 mm truth)'),
-        (prd, sp_p, 'PREDICTION (super-res)'),
-        (tgt, sp_t, 'ORIGINAL (1 mm truth)'),
-    ]
-    frames = [render_frame(arr, sp, slices, vmin, vmax, label, a.panel_px, a.flip)
-              for arr, sp, label in sequence]
-
-    frames[0].save(a.out, save_all=True, append_images=frames[1:],
-                   duration=a.ms, loop=0, disposal=2)
-    print('wrote %s  (%d frames, %d ms each, looping)' % (a.out, len(frames), a.ms))
+    try:
+        build_gif(a.lowres, a.target, a.pred, out, title=None, **render_opts)
+    except ValueError as e:
+        sys.exit(str(e))
+    print('wrote %s' % out)
 
 
 if __name__ == '__main__':
