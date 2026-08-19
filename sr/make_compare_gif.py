@@ -157,7 +157,7 @@ def _pred_subdir(pred_tag):
 
 def build_gif(lowres, target, pred, out_path, clip=(1.0, 99.0), flip='v',
               ms=1500, panel_px=500, slices=None, title=None, border_px=20,
-              quiet=False):
+              save_frames=True, png_stem=None, version='', quiet=False):
     """Render the low-res -> original -> prediction -> original loop for one volume.
 
     Raises ValueError on a grid mismatch so a batch caller can skip and continue.
@@ -189,8 +189,25 @@ def build_gif(lowres, target, pred, out_path, clip=(1.0, 99.0), flip='v',
               for arr, sp, label, col in sequence]
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=ms, loop=0, disposal=2)
+    # Also drop the three unique frames as static PNGs (same slice/window/border
+    # as the gif) so runs can be compared frame-for-frame without the flicker.
+    # Only the PREDICTION carries the version (<stem>_prediction_<version>.png);
+    # lowres/original are identical across runs, so they stay version-free. Collect
+    # several runs into one --out_dir and each participant's predictions sit
+    # together, e.g. i0022_..._prediction_L1.png / _prediction_adv1.png / _edge3.png.
+    if save_frames:
+        d = os.path.dirname(out_path)
+        stem = png_stem if png_stem is not None else (
+            os.path.basename(out_path)[:-4]
+            if out_path.lower().endswith('.gif') else os.path.basename(out_path))
+        vsuf = ('_' + version) if version else ''
+        stills = [(frames[0], '%s_lowres.png' % stem),
+                  (frames[1], '%s_original.png' % stem),
+                  (frames[2], '%s_prediction%s.png' % (stem, vsuf))]
+        for fr, fname in stills:
+            fr.save(os.path.join(d, fname))
     if not quiet:
-        print('  wrote %s' % out_path)
+        print('  wrote %s%s' % (out_path, ' (+3 png)' if save_frames else ''))
 
 
 def resolve_by_index(index, mode, fold, test_dir, pred_dir, pred_tag):
@@ -227,14 +244,18 @@ def resolve_by_index(index, mode, fold, test_dir, pred_dir, pred_tag):
     return lowres, target, pred, 'compare_%s_%s_%d%s.gif' % (mode, fold, index, suffix)
 
 
-def run_batch(mode, pred_tag, out_dir, ds_root, eval_root, opts):
+def run_batch(mode, pred_tag, version, out_dir, ds_root, eval_root, opts):
     """One GIF per held-out participant, across ALL folds, named by participant.
 
     Walks every ${EVAL_DIR}_<mode>/fold*/ directory, reads its per_volume.csv to
     map the on-disk index (0,1,...) back to the participant stem, finds the
-    matching input/target/prediction, and writes <stem>[_<pred_tag>].gif. The
-    pred_tag both selects predictions-<tag>/ AND is appended to every output name,
-    so an adversarial run cannot overwrite the L1 GIFs.
+    matching input/target/prediction, and writes:
+        <out_dir>/<stem>[_<version>].gif
+        <out_dir>/<stem>_lowres.png, _original.png          (version-free)
+        <out_dir>/<stem>_prediction[_<version>].png         (version on prediction)
+    `pred_tag` selects predictions-<tag>/; `version` labels the outputs (defaults to
+    pred_tag). Point several runs at one --out_dir with distinct --version labels
+    and each participant's predictions collect together for easy comparison.
     """
     if eval_root is None:
         ed = os.environ.get('EVAL_DIR')
@@ -256,9 +277,9 @@ def run_batch(mode, pred_tag, out_dir, ds_root, eval_root, opts):
                  % eval_root)
 
     if out_dir is None:
-        out_dir = os.path.join(eval_root, 'gifs' + (('-' + pred_tag) if pred_tag else ''))
+        out_dir = os.path.join(eval_root, 'gifs' + (('-' + version) if version else ''))
     os.makedirs(out_dir, exist_ok=True)
-    suffix = ('_' + pred_tag) if pred_tag else ''
+    suffix = ('_' + version) if version else ''
     pred_sub = _pred_subdir(pred_tag)
 
     n_ok = n_skip = 0
@@ -287,7 +308,8 @@ def run_batch(mode, pred_tag, out_dir, ds_root, eval_root, opts):
                 continue
             out = os.path.join(out_dir, '%s%s.gif' % (stem, suffix))
             try:
-                build_gif(lowres, target, pred, out, title=stem, **opts)
+                build_gif(lowres, target, pred, out, title=stem, png_stem=stem,
+                          version=version, **opts)
                 n_ok += 1
             except Exception as e:                               # noqa: BLE001
                 print('  [fail] %s: %s' % (stem, e))
@@ -313,9 +335,13 @@ def main(argv=None):
                         '(default folddev). Ignored by --all.')
     p.add_argument('--pred_tag', default='',
                    help='Predictions subdir suffix, matching evaluate_sr --pred_tag: '
-                        '"" -> predictions/, "adv_latest" -> predictions-adv_latest/. '
-                        'Also appended to every output GIF name so an adversarial '
-                        'run never overwrites the L1 GIFs.')
+                        '"" -> predictions/, "adv_latest" -> predictions-adv_latest/.')
+    p.add_argument('--version', default='',
+                   help='Label appended to outputs (gif and the _prediction png) to '
+                        'tell runs apart, e.g. L1 / adv1 / edge3. Defaults to '
+                        '--pred_tag. Point several runs at one --out_dir with '
+                        'distinct --version labels to collect predictions together '
+                        'as <stem>_prediction_<version>.png.')
     p.add_argument('--out_dir', default=None,
                    help='Batch output dir (default ${EVAL_DIR}_<mode>/gifs[-<tag>]).')
     p.add_argument('--ds_root', default=None,
@@ -345,13 +371,20 @@ def main(argv=None):
     p.add_argument('--border_px', type=int, default=20,
                    help='Colour-coded border thickness in px (red=low-res, '
                         'green=original, yellow=prediction). 0 disables it.')
+    p.add_argument('--no_frames', dest='save_frames', action='store_false',
+                   help='Do NOT also save the three montage frames as PNGs '
+                        '(<name>_lowres/_original/_prediction.png). They are saved '
+                        'by default so runs can be compared still-to-still.')
     a = p.parse_args(argv)
+    version = a.version or a.pred_tag          # --version overrides; else pred_tag
     render_opts = dict(clip=tuple(a.clip), flip=a.flip, ms=a.ms,
-                       panel_px=a.panel_px, slices=a.slices, border_px=a.border_px)
+                       panel_px=a.panel_px, slices=a.slices, border_px=a.border_px,
+                       save_frames=a.save_frames)
 
     # Batch: one GIF per participant across all folds.
     if a.all:
-        run_batch(a.mode, a.pred_tag, a.out_dir, a.ds_root, a.eval_root, render_opts)
+        run_batch(a.mode, a.pred_tag, version, a.out_dir, a.ds_root, a.eval_root,
+                  render_opts)
         return
 
     # Single volume: by index (auto-located) or by explicit paths.
@@ -366,7 +399,8 @@ def main(argv=None):
     out = out or 'compare.gif'
 
     try:
-        build_gif(a.lowres, a.target, a.pred, out, title=None, **render_opts)
+        build_gif(a.lowres, a.target, a.pred, out, title=None, version=version,
+                  **render_opts)
     except ValueError as e:
         sys.exit(str(e))
     print('wrote %s' % out)
