@@ -88,8 +88,12 @@ def center_of_mass(arr):
     return [int(round(c.mean())) for c in idx]
 
 
-def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px):
-    """One montage: sagittal | coronal | axial, titled with `label`. Returns RGB."""
+def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px, flip='v'):
+    """One montage: sagittal | coronal | axial, titled with `label`. Returns RGB.
+
+    `flip` reorients the displayed slices: 'v' flips vertically (the default, so
+    superior is up for these volumes), 'h' horizontally, 'vh' both, 'none' as-is.
+    """
     # (fixed axis, the two in-plane axes) for each orthogonal view
     views = [(0, 'Sagittal'), (1, 'Coronal'), (2, 'Axial')]
     dpi = 100
@@ -100,7 +104,12 @@ def render_frame(arr, spacing, slices, vmin, vmax, label, panel_px):
         inplane = [a for a in range(3) if a != fixed]
         sa, sb = spacing[inplane[0]], spacing[inplane[1]]
         # Show as (rows=second in-plane axis, cols=first) with physical aspect.
-        ax.imshow(sl.T, cmap='gray', origin='lower', vmin=vmin, vmax=vmax,
+        disp = sl.T
+        if flip in ('v', 'vh'):
+            disp = disp[::-1, :]          # flip the vertical (display-row) axis
+        if flip in ('h', 'vh'):
+            disp = disp[:, ::-1]          # flip the horizontal (display-col) axis
+        ax.imshow(disp, cmap='gray', origin='lower', vmin=vmin, vmax=vmax,
                   interpolation='nearest',
                   extent=[0, sl.shape[0] * sa, 0, sl.shape[1] * sb], aspect='equal')
         ax.set_title(name, color='0.8', fontsize=10)
@@ -178,6 +187,9 @@ def main(argv=None):
                    help='voxel slice indices; default = target centre of mass')
     p.add_argument('--clip', type=float, nargs=2, default=[1.0, 99.0],
                    metavar=('LO', 'HI'), help='display percentiles (default 1 99)')
+    p.add_argument('--flip', choices=['v', 'h', 'vh', 'none'], default='v',
+                   help="display flip: 'v' vertical (default), 'h' horizontal, "
+                        "'vh' both, 'none' as-is.")
     a = p.parse_args(argv)
 
     # Index mode: derive the three paths (and a default output name).
@@ -218,7 +230,7 @@ def main(argv=None):
         (prd, sp_p, 'PREDICTION (super-res)'),
         (tgt, sp_t, 'ORIGINAL (1 mm truth)'),
     ]
-    frames = [render_frame(arr, sp, slices, vmin, vmax, label, a.panel_px)
+    frames = [render_frame(arr, sp, slices, vmin, vmax, label, a.panel_px, a.flip)
               for arr, sp, label in sequence]
 
     frames[0].save(a.out, save_all=True, append_images=frames[1:],
