@@ -178,7 +178,7 @@ def main(argv=None):
     p.add_argument('--target', help='1 mm truth (network target)')
     p.add_argument('--pred', help='model prediction')
     p.add_argument('--out', default=None, help='output .gif')
-    p.add_argument('--ms', type=int, default=600, help='ms per frame (default 600)')
+    p.add_argument('--ms', type=int, default=1500, help='ms per frame (default 1500)')
     p.add_argument('--panel_px', type=int, default=500,
                    help='pixels per orthogonal view (default 500; raise for a '
                         'higher-resolution gif)')
